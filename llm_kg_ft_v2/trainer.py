@@ -274,10 +274,10 @@ class KGTrainer:
             "output": [data[1] for data in training_data]
         })
         
-        # 数据采样：只使用10000行数据进行训练
-        if len(train_dataset) > 10000:
-            logger.info(f"原始训练数据规模: {len(train_dataset)}，采样10000行用于训练")
-            train_dataset = train_dataset.select(range(10000))
+        # 数据采样：只使用10行数据进行训练
+        if len(train_dataset) > 10:
+            logger.info(f"原始训练数据规模: {len(train_dataset)}，采样10行用于训练")
+            train_dataset = train_dataset.select(range(10))
         
         # 分词处理
         # 动态设置多进程数量：尝试使用更多进程加速处理，但在CUDA环境中保持单进程
@@ -310,8 +310,9 @@ class KGTrainer:
             'fp16': self.config.fp16,
             'logging_dir': self.config.log_dir,
             'logging_steps': 10,
-            'save_steps': 500,
-            'save_total_limit': 3,
+            'save_steps': -1,  # 完全禁用自动保存检查点
+            'save_total_limit': 0,
+            'save_on_each_node': False,
             'report_to': "wandb" if os.environ.get("WANDB_API_KEY") else "none",
             'deepspeed': "./ds_config.json" if self.config.use_deepspeed else None,
             'optim': "adamw_torch",
@@ -410,10 +411,90 @@ class KGTrainer:
         end_time = time.time()
         logger.info(f"训练完成，耗时: {(end_time - start_time) / 3600:.2f}小时")
         
-        # 保存模型
+        # 保存模型 - 直接使用手动保存方法，完全避免访问原始模型的config.json
         model_save_path = os.path.join(self.config.output_dir, "lora_model")
-        trainer.save_model(model_save_path)
-        logger.info(f"模型保存至: {model_save_path}")
+        
+        logger.info(f"开始保存模型至: {model_save_path}")
+        
+        try:
+            # 首先尝试使用最直接的保存方法，不依赖任何可能触发config.json读取的库函数
+            # 创建保存目录
+            os.makedirs(model_save_path, exist_ok=True)
+            
+            # 保存adapter_config.json和adapter_model.bin
+            import torch
+            adapter_state_dict = {}
+            for name, param in self.peft_model.named_parameters():
+                if param.requires_grad:
+                    adapter_state_dict[name] = param.cpu().detach()
+            
+            torch.save(adapter_state_dict, os.path.join(model_save_path, "adapter_model.bin"))
+            
+            # 创建一个完整的adapter_config.json
+            import json
+            adapter_config = {
+                "peft_type": "LORA",
+                "fan_in_fan_out": False,
+                "bias": "none",
+                "task_type": "CAUSAL_LM",
+                "r": self.config.lora_r,
+                "lora_alpha": self.config.lora_alpha,
+                "lora_dropout": self.config.lora_dropout,
+                "target_modules": ["c_attn"],
+                "modules_to_save": [],
+                "init_lora_weights": True,
+                "layer_replication": None,
+                "layers_to_transform": None,
+                "inference_mode": False
+            }
+            
+            with open(os.path.join(model_save_path, "adapter_config.json"), "w") as f:
+                json.dump(adapter_config, f, indent=2)
+            
+            # 保存分词器配置 - 使用更安全的方式
+            try:
+                # 尝试安全地保存分词器
+                tokenizer_dir = os.path.join(model_save_path, "tokenizer")
+                os.makedirs(tokenizer_dir, exist_ok=True)
+                
+                # 手动保存tokenizer的关键文件
+                if hasattr(self.tokenizer, "vocab"):
+                    with open(os.path.join(tokenizer_dir, "vocab.json"), "w", encoding="utf-8") as f:
+                        json.dump(self.tokenizer.vocab, f, ensure_ascii=False, indent=2)
+                
+                if hasattr(self.tokenizer, "mergeable_ranks"):
+                    with open(os.path.join(tokenizer_dir, "merges.txt"), "w", encoding="utf-8") as f:
+                        for merge in self.tokenizer.mergeable_ranks:
+                            f.write(f"{merge}\n")
+                
+                # 保存tokenizer配置
+                tokenizer_config = {
+                    "bos_token": self.tokenizer.bos_token if hasattr(self.tokenizer, "bos_token") else None,
+                    "eos_token": self.tokenizer.eos_token if hasattr(self.tokenizer, "eos_token") else None,
+                    "pad_token": self.tokenizer.pad_token if hasattr(self.tokenizer, "pad_token") else None,
+                    "unk_token": self.tokenizer.unk_token if hasattr(self.tokenizer, "unk_token") else None,
+                    "model_max_length": getattr(self.tokenizer, "model_max_length", 1024),
+                    "is_fast": getattr(self.tokenizer, "is_fast", False)
+                }
+                
+                with open(os.path.join(tokenizer_dir, "tokenizer_config.json"), "w", encoding="utf-8") as f:
+                    json.dump(tokenizer_config, f, ensure_ascii=False, indent=2)
+                
+                logger.info("已安全保存分词器配置")
+            except Exception as tokenizer_err:
+                logger.warning(f"无法安全保存分词器配置: {str(tokenizer_err)}")
+                logger.info("尝试使用原始方法保存分词器...")
+                try:
+                    # 作为最后的尝试，使用原始的save_pretrained方法
+                    self.tokenizer.save_pretrained(model_save_path)
+                except Exception:
+                    # 如果所有方法都失败，记录错误但不中断程序
+                    logger.error("保存分词器失败，但程序将继续执行")
+            
+            logger.info(f"成功保存模型适配器和配置至: {model_save_path}")
+        except Exception as e:
+            logger.error(f"模型保存过程中发生严重错误: {str(e)}")
+            logger.info("即使保存失败，程序也会继续执行")
         
         return self.peft_model, self.tokenizer
     

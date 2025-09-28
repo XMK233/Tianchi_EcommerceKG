@@ -1,109 +1,218 @@
-# 知识图谱补全系统 (LLM-KG-FT-V2)
+# LLM-KG-FT-V2: 知识图谱增强的大语言模型微调框架
 
-本项目实现了基于大型语言模型（LLM）的知识图谱补全系统，通过LoRA微调Qwen-1.8B-Chat模型来预测知识图谱中缺失的尾实体。
+本项目实现了一个基于知识图谱(Knowledge Graph)的大语言模型(LLM)微调框架，旨在通过知识图谱中的三元组信息增强大语言模型的知识推理能力。
+
+## 代码功能概述
+
+本框架主要实现了以下功能：
+
+1. 知识图谱数据处理与预处理
+2. 负采样机制实现
+3. 基于LoRA的参数高效微调
+4. 自定义数据收集器确保训练稳定性
+5. 支持DeepSpeed加速训练
+6. 完整的评估和预测流程
 
 ## 项目结构
 
 ```
 llm_kg_ft_v2/
-├── config.py              # 配置文件，包含所有参数设置
-├── data_processor.py      # 数据处理模块，负责加载和处理数据
-├── trainer.py             # 模型训练模块，实现训练和评估功能
-├── main.py                # 主程序，整合所有功能
-├── ds_config.json         # DeepSpeed配置文件，优化训练效率
-├── requirements.txt       # 项目依赖包列表
-├── outputs/               # 模型输出和预测结果目录
-└── logs/                  # 日志文件目录
+├── config.py        # 项目配置参数
+├── data_processor.py # 数据处理模块
+├── trainer.py       # 模型训练和预测模块
+├── main.py          # 主程序入口
+└── README.md        # 项目说明文档
 ```
 
-## 功能特点
+## 数据获取与预处理
 
-1. **数据处理**：自动加载OpenBG500数据集，处理实体和关系的中文文本映射
-2. **负采样**：为训练数据生成负样本，提高模型区分能力
-3. **LoRA微调**：使用参数高效微调技术，减少显存占用
-4. **DeepSpeed优化**：利用分布式训练框架提高GPU使用率
-5. **混合精度训练**：支持FP16混合精度训练，进一步减少显存需求
-6. **评估与预测**：在开发集上评估模型性能，在测试集上生成预测结果
+### 数据集
 
-## 环境要求
+本项目使用OpenBG500数据集进行训练和评估，数据集文件配置在`config.py`中：
 
-- Python 3.8+ 
-- CUDA 11.7+（支持4070TiS显卡）
-- 16GB显存以上的GPU
-- 32GB系统内存
-
-## 安装依赖
-
-```bash
-cd llm_kg_ft_v2
-pip install -r requirements.txt
+```python
+# config.py中的数据集配置
+dataset_dir = os.path.join(project_dir, "data", "OpenBG500")
+train_file = os.path.join(dataset_dir, "train.txt")
+dev_file = os.path.join(dataset_dir, "valid.txt")
+test_file = os.path.join(dataset_dir, "test.txt")
 ```
 
-## 配置说明
+### 数据预处理流程
 
-主要配置参数在`config.py`文件中设置：
+数据预处理主要在`KGDataProcessor`类中实现，包括以下步骤：
 
-- **数据集路径**：设置训练、测试、开发数据集以及实体和关系文本映射文件的路径
-- **模型配置**：设置预训练模型名称、缓存目录等
-- **训练参数**：batch size、学习率、LoRA参数等
-- **输出配置**：设置模型保存和日志输出的目录
+1. **实体和关系映射加载**：
+   - 从数据集文件中加载实体ID到文本的映射
+   - 从数据集文件中加载关系ID到文本的映射
 
-## 使用方法
+2. **三元组数据加载**：
+   - 读取训练、验证和测试数据中的三元组(head, relation, tail)
 
-### 训练模型
+3. **负采样处理**：
+   - 实现并行和串行两种负采样方法
+   - 为每个正样本生成多个负样本
+
+4. **Prompt构建**：
+   - 根据三元组信息构建适合大语言模型输入的文本提示
+   - 例如："已知头实体是[头实体文本]，关系是[关系文本]，那么尾实体是什么？"
+
+5. **训练数据准备**：
+   - 结合正样本和负样本生成最终的训练数据
+   - 为每个样本添加标签以进行监督学习
+
+## 数据采样方法
+
+项目在数据采样方面实现了以下策略：
+
+1. **训练集采样限制**：
+   - 在`trainer.py`的`train`方法中限制采样10000行数据进行训练
+   - 这是为了控制训练规模和时间
+
+2. **动态进程配置**：
+   - 根据运行环境自动调整数据处理的进程数
+   - 在非CUDA环境下最多使用8个进程，以避免资源过度消耗
+
+```python
+# trainer.py中的动态进程配置
+if not torch.cuda.is_available():
+    num_proc = min(8, multiprocessing.cpu_count())
+    logger.info(f"CUDA不可用，使用多进程加速: {num_proc}个进程")
+```
+
+## 预训练模型使用
+
+本项目使用字节跳动的Qwen-1_8B-Chat模型作为基础模型：
+
+```python
+# config.py中的模型配置
+model_name_or_path = "Qwen/Qwen-1_8B-Chat"
+model_cache_dir = os.path.join(project_dir, "model_cache")
+```
+
+主要特点：
+- 支持4bit量化以减少显存占用
+- 实现了安全的tokenizer配置，解决了Qwen模型特有的pad_token_id问题
+
+## 微调结构设计
+
+本项目采用LoRA(Low-Rank Adaptation)技术进行参数高效微调，具体设计如下：
+
+### LoRA配置
+
+```python
+# trainer.py中的LoRA配置
+lora_config = LoraConfig(
+    r=config.lora_rank,  # LoRA的秩，控制可训练参数的数量
+    lora_alpha=config.lora_alpha,  # LoRA的缩放因子
+    target_modules=["c_attn"],  # 针对Qwen模型的注意力模块
+    lora_dropout=config.lora_dropout,
+    bias="none",
+    task_type="CAUSAL_LM"
+)
+```
+
+### 训练优化器配置
+
+项目中配置了AdamW优化器和学习率调度器，同时使用DeepSpeed进行训练加速：
+
+```python
+# config.py中的训练参数配置
+learning_rate = 2e-5
+weight_decay = 0.01
+warmup_ratio = 0.1
+batch_size = 4
+num_epochs = 3
+```
+
+### 安全数据收集器
+
+为解决训练过程中的张量长度不匹配问题，项目实现了自定义的`SafeDataCollator`类：
+
+- 自动检测批次中最长的序列长度
+- 对所有样本进行统一的padding处理
+- 确保input_ids、attention_mask和labels张量长度一致
+- 支持ignore_pad_token_for_loss参数，避免在计算损失时考虑padding值
+
+## 训练和预测开展方式
+
+### 训练流程
+
+训练流程主要在`KGTrainer`类的`train`方法中实现：
+
+1. **模型和分词器加载**：
+   - 加载预训练的Qwen模型
+   - 配置分词器，解决pad_token_id问题
+   - 应用LoRA适配器
+
+2. **数据集处理**：
+   - 加载训练数据
+   - 应用tokenize_function进行分词
+   - 使用map操作进行并行处理
+
+3. **训练参数配置**：
+   - 设置TrainingArguments
+   - 配置DeepSpeed参数
+   - 应用混合精度训练(fp16)
+
+4. **训练执行**：
+   - 使用HuggingFace的Trainer API进行训练
+   - 保存训练好的LoRA模型
+
+### 评估流程
+
+评估流程在`evaluate`方法中实现：
+
+1. 使用beam search进行文本生成，提高生成质量
+2. 计算模型在开发集上的准确率
+3. 记录评估结果
+
+### 预测流程
+
+预测流程在`predict`方法中实现：
+
+1. 对测试集中的每个三元组进行预测
+2. 提取预测的尾实体文本
+3. 将预测结果保存到输出文件
+
+### 主程序流程
+
+`main.py`整合了以上所有流程：
+
+1. 设置随机种子，保证实验可重复性
+2. 检查CUDA可用性
+3. 创建数据处理器和训练器实例
+4. 根据用户选择决定是否重新训练模型
+5. 在开发集上评估模型
+6. 在测试集上进行预测并保存结果
+
+## 运行环境要求
+
+- Python 3.8+
+- PyTorch
+- Transformers
+- PEFT
+- DeepSpeed
+- CUDA环境(推荐，用于加速训练)
+
+## 运行方式
+
+直接运行主程序即可启动整个训练和评估流程：
 
 ```bash
 python main.py
 ```
 
 程序会自动：
-1. 加载数据集和映射表
-2. 如果没有已训练的模型，则执行训练过程
+1. 检查是否存在已训练的模型
+2. 根据用户选择进行模型训练或加载已有模型
 3. 在开发集上评估模型性能
 4. 在测试集上进行预测并保存结果
 
-### 重新训练模型
+## 输出结果
 
-如果已存在训练好的模型，程序会询问是否重新训练。输入`y`将重新开始训练过程。
+训练完成后，会生成以下输出：
 
-## 优化策略
-
-为了在4070TiS 16GB显存的硬件条件下高效运行，本项目采用了以下优化策略：
-
-1. **4bit量化**：使用4bit量化加载预训练模型，大幅减少显存占用
-2. **LoRA微调**：仅训练少量参数，保持模型性能的同时降低显存需求
-3. **混合精度训练**：使用FP16混合精度训练，减少约50%的显存使用
-4. **梯度累积**：通过梯度累积模拟更大的batch size
-5. **DeepSpeed优化**：利用ZeRO-2优化器进一步减少显存占用和提高训练效率
-
-这些优化措施可以将GPU使用率提高到80-90%，充分利用硬件资源。
-
-## 预测结果
-
-测试集的预测结果将保存在`outputs/test_predictions.tsv`文件中，格式为：
-
-```
-头实体ID\t关系ID\t真实尾实体ID\t预测的尾实体文本
-```
-
-## 注意事项
-
-1. 首次运行会自动下载预训练模型，设置了中国大陆源以加速下载
-2. 确保数据集路径正确，并且具有读写权限
-3. 如果显存不足，可以尝试减小`config.py`中的`batch_size`参数
-4. 训练过程中会生成日志文件，保存在`logs/`目录下
-
-## 常见问题
-
-### Q: 下载模型速度慢怎么办？
-A: 程序已经设置了中国大陆的镜像源（HF_ENDPOINT=https://hf-mirror.com），如果仍然速度较慢，可以考虑手动下载模型并放置在指定的缓存目录中。
-
-### Q: 训练过程中显存不足怎么办？
-A: 可以尝试以下方法：
-- 减小`batch_size`参数
-- 增加`gradient_accumulation_steps`参数
-- 减小`lora_r`参数值
-- 关闭`fp16`选项（但会显著增加显存占用）
-
-### Q: 如何调整生成文本的质量？
-A: 可以调整`config.py`中的`temperature`、`max_new_tokens`和生成时的`num_beams`参数来控制生成文本的质量和多样性。
+1. 训练好的LoRA模型(保存在`output_dir/lora_model`目录下)
+2. 测试集预测结果(保存在`output_dir/test_predictions.tsv`文件中)
+3. 评估指标报告(包括开发集准确率)

@@ -22,8 +22,8 @@ class Config:
     batch_size = 4
     num_epochs = 3
     learning_rate = 2e-5
-    lora_r = 8
-    lora_alpha = 16
+    lora_r = 4#8
+    lora_alpha = 8#16
     lora_dropout = 0.1
     gradient_accumulation_steps = 4
     warmup_ratio = 0.1
