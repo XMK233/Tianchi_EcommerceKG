@@ -6,6 +6,10 @@ import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader, default_collate
 import random
 import time
+import jieba
+from gensim.models import KeyedVectors
+from sklearn.metrics.pairwise import cosine_similarity
+import re
 
 # 设置随机种子以确保结果可复现
 def set_seed(seed=123):
@@ -25,6 +29,14 @@ TEST_FILE_PATH = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/originalData/OpenBG5
 DEV_FILE_PATH = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/originalData/OpenBG500/OpenBG500_dev.tsv" # 开发集路径
 OUTPUT_FILE_PATH = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/preprocessedData/OpenBG500_test.tsv"
 
+# 中文文本数据路径
+ENTITY_TEXT_PATH = "D:\\forCoding_data\\Tianchi_EcommerceKG\\originalData\\OpenBG500\\OpenBG500_entity2text.tsv"
+RELATION_TEXT_PATH = "D:\\forCoding_data\\Tianchi_EcommerceKG\\originalData\\OpenBG500\\OpenBG500_relation2text.tsv"
+
+# 预训练词向量路径（假设使用中文维基百科预训练的Word2Vec模型）
+# 注意：用户需要下载这个模型，这里提供的是假设路径
+WORD2VEC_PATH = "D:\\pretrained_models\\wiki.zh.word2vec.bin"
+
 # 超参数
 EMBEDDING_DIM = 200  # 实体和关系嵌入的维度
 LEARNING_RATE = 0.001  # 学习率（降低学习率以改善收敛）
@@ -40,6 +52,11 @@ max_head_entities = None  # 限制预测的头实体数量，None表示处理全
 # 学习率调度器参数
 LR_DECAY_FACTOR = 0.5  # 学习率衰减因子
 LR_DECAY_STEP = 50  # 每隔多少个epoch衰减一次学习率
+
+# NLP参数
+TEXT_EMBEDDING_DIM = 300  # 文本嵌入维度
+TEXT_WEIGHT = 0.3  # 文本特征在最终评分中的权重
+TOP_K_CANDIDATES = 100  # 在文本排序阶段考虑的候选实体数量
 
 # 数据加载类 - 优化版：预处理实体和关系ID以减少运行时计算
 class KnowledgeGraphDataset(Dataset):
@@ -95,8 +112,8 @@ def collate_fn(batch, mapper):
         # 测试数据
         return h_ids, r_ids, None
 
-# 实体和关系映射管理器
-class EntityRelationMapper:
+# 实体和关系映射管理器 - 增强版：支持中文文本信息
+class EnhancedEntityRelationMapper:
     def __init__(self):
         self.entity_to_id = {}  # 实体到ID的映射字典
         self.id_to_entity = {}  # ID到实体的映射字典
@@ -104,6 +121,12 @@ class EntityRelationMapper:
         self.id_to_relation = {}  # ID到关系的映射字典
         self.entity_count = 0  # 实体数量
         self.relation_count = 0  # 关系数量
+        
+        # 添加中文文本映射
+        self.entity_to_text = {}  # 实体到中文文本的映射
+        self.relation_to_text = {}  # 关系到中文文本的映射
+        self.entity_text_embeddings = {}  # 实体中文文本的向量表示
+        self.relation_text_embeddings = {}  # 关系中文文本的向量表示
     
     def add_entity(self, entity):
         # 如果实体不存在于映射中，则添加
@@ -137,11 +160,109 @@ class EntityRelationMapper:
                 self.add_entity(h)
                 self.add_entity(t)
                 self.add_relation(r)
+    
+    def load_text_mappings(self, entity_text_path, relation_text_path):
+        """加载实体和关系的中文文本信息"""
+        # 加载实体中文文本
+        try:
+            with open(entity_text_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 2:
+                        entity_id = parts[0]
+                        entity_text = parts[1]
+                        self.entity_to_text[entity_id] = entity_text
+            print(f"已加载 {len(self.entity_to_text)} 个实体的中文文本信息")
+        except Exception as e:
+            print(f"加载实体文本信息时出错: {e}")
+        
+        # 加载关系中文文本
+        try:
+            with open(relation_text_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) >= 2:
+                        relation_id = parts[0]
+                        relation_text = parts[1]
+                        self.relation_to_text[relation_id] = relation_text
+            print(f"已加载 {len(self.relation_to_text)} 个关系的中文文本信息")
+        except Exception as e:
+            print(f"加载关系文本信息时出错: {e}")
+    
+    def init_text_embeddings(self, word2vec_path=None):
+        """初始化中文文本的向量表示"""
+        # 尝试加载预训练词向量模型
+        word_vectors = None
+        try:
+            if os.path.exists(word2vec_path):
+                print(f"正在加载预训练词向量模型: {word2vec_path}")
+                word_vectors = KeyedVectors.load_word2vec_format(word2vec_path, binary=True)
+                print("词向量模型加载完成")
+            else:
+                print(f"预训练词向量模型文件不存在: {word2vec_path}")
+                print("将使用随机初始化的向量")
+        except Exception as e:
+            print(f"加载预训练词向量模型时出错: {e}")
+            print("将使用随机初始化的向量")
+        
+        # 为实体文本创建向量表示
+        for entity_id, text in self.entity_to_text.items():
+            self.entity_text_embeddings[entity_id] = self._get_text_embedding(text, word_vectors)
+        
+        # 为关系文本创建向量表示
+        for relation_id, text in self.relation_to_text.items():
+            self.relation_text_embeddings[relation_id] = self._get_text_embedding(text, word_vectors)
+    
+    def _get_text_embedding(self, text, word_vectors):
+        """获取文本的向量表示"""
+        # 清理文本
+        text = self._clean_text(text)
+        
+        # 分词
+        words = list(jieba.cut(text))
+        
+        if not words:
+            return np.random.rand(TEXT_EMBEDDING_DIM)
+        
+        # 使用词向量计算文本向量
+        if word_vectors is not None:
+            vectors = []
+            for word in words:
+                if word in word_vectors:
+                    vectors.append(word_vectors[word])
+            
+            if vectors:
+                return np.mean(vectors, axis=0)
+        
+        # 如果没有词向量或词汇不在词向量中，返回随机向量
+        return np.random.rand(TEXT_EMBEDDING_DIM)
+    
+    def _clean_text(self, text):
+        """清理文本，去除特殊字符"""
+        # 保留中文、英文、数字和常见标点
+        text = re.sub(r'[^\u4e00-\u9fa5a-zA-Z0-9，。, .]', ' ', text)
+        # 去除多余空格
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+    
+    def get_text_similarity(self, h_text, r_text, t_text):
+        """计算头实体、关系和尾实体之间的文本语义相似度"""
+        if h_text in self.entity_text_embeddings and r_text in self.relation_text_embeddings and t_text in self.entity_text_embeddings:
+            h_emb = self.entity_text_embeddings[h_text].reshape(1, -1)
+            r_emb = self.relation_text_embeddings[r_text].reshape(1, -1)
+            t_emb = self.entity_text_embeddings[t_text].reshape(1, -1)
+            
+            # 计算语义匹配度：h + r 与 t 的相似度
+            h_r_emb = (h_emb + r_emb) / 2  # 简单融合头实体和关系的文本向量
+            similarity = cosine_similarity(h_r_emb, t_emb)[0][0]
+            return similarity
+        else:
+            return 0.0
 
-# TransE模型实现
-class TransE(nn.Module):
-    def __init__(self, num_entities, num_relations, embedding_dim):
-        super(TransE, self).__init__()
+# TransE模型实现 - 增强版：支持文本特征融合
+class EnhancedTransE(nn.Module):
+    def __init__(self, num_entities, num_relations, embedding_dim, mapper=None):
+        super(EnhancedTransE, self).__init__()
         # 初始化实体和关系嵌入层
         self.entity_embeddings = nn.Embedding(num_entities, embedding_dim)
         self.relation_embeddings = nn.Embedding(num_relations, embedding_dim)
@@ -152,6 +273,9 @@ class TransE(nn.Module):
         
         # 归一化实体嵌入
         self.normalize_entities()
+        
+        # 存储mapper引用，用于访问文本信息
+        self.mapper = mapper
     
     def normalize_entities(self):
         # 对实体嵌入进行L2归一化
@@ -391,8 +515,8 @@ def evaluate(model, dev_dataset, mapper, device, batch_size=128, max_entities_pe
     
     return hits_at_1, hits_at_3, hits_at_10, mrr_score
 
-# 预测函数 - 优化版本（向量化计算，带进度条和显存优化）
-def predict_tail_entities(model, test_dataset, mapper, device, max_head_entities=None, batch_size=128, max_entities_per_batch=10000):
+# 预测函数 - 增强版：结合结构特征和文本特征
+def predict_tail_entities_with_text(model, test_dataset, mapper, device, max_head_entities=None, batch_size=128, max_entities_per_batch=10000):
     model.eval()
     results = []
     total_test_triples = len(test_dataset.triples)
@@ -401,9 +525,9 @@ def predict_tail_entities(model, test_dataset, mapper, device, max_head_entities
     process_count = total_test_triples if max_head_entities is None else min(max_head_entities, total_test_triples)
     print(f"\n开始预测尾实体...")
     print(f"将处理 {process_count} 个头实体/关系对")
+    print(f"使用文本特征增强预测，文本特征权重: {TEXT_WEIGHT}")
     
     # 计算每个批次能处理的最大实体数量（避免显存溢出）
-    # 根据显存大小动态调整，假设16GB显存，每个实体需要embedding_dim*4字节
     max_entities_per_batch = min(10000, mapper.entity_count)  # 限制最大实体数
     
     with torch.no_grad():
@@ -450,13 +574,41 @@ def predict_tail_entities(model, test_dataset, mapper, device, max_head_entities
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             
-            # 获取每个头实体/关系对的top10尾实体
-            _, top10_indices = torch.topk(-batch_scores, k=10, dim=1)  # 使用负数以获取最小的10个值
-            
-            # 处理批次结果
+            # 处理批次结果，结合文本特征
             for i in range(len(batch_triples)):
                 h, r, _ = batch_triples[i]  # 正确解包3元素元组
-                top10_t_ids = top10_indices[i].tolist()
+                
+                # 首先获取TransE模型的top K候选实体
+                _, top_k_indices = torch.topk(-batch_scores[i], k=TOP_K_CANDIDATES, dim=0)  # 使用负数以获取最小的K个值
+                top_k_ids = top_k_indices.tolist()
+                top_k_entities = [mapper.id_to_entity[t_id] for t_id in top_k_ids]
+                
+                # 计算每个候选实体的文本相似度得分
+                text_scores = []
+                for candidate in top_k_entities:
+                    # 获取原始ID（不是内部索引）
+                    original_h_id = h
+                    original_r_id = r
+                    original_t_id = candidate
+                    
+                    # 计算文本相似度得分
+                    similarity = mapper.get_text_similarity(original_h_id, original_r_id, original_t_id)
+                    text_scores.append(similarity)
+                
+                # 融合结构得分和文本得分
+                combined_scores = []
+                for j, t_id in enumerate(top_k_ids):
+                    # TransE得分（越低越好）转换为（越高越好）
+                    structure_score = 1.0 / (1.0 + batch_scores[i][t_id].item())
+                    # 文本得分（已经是越高越好）
+                    text_score = text_scores[j]
+                    # 加权融合
+                    combined_score = (1 - TEXT_WEIGHT) * structure_score + TEXT_WEIGHT * text_score
+                    combined_scores.append((combined_score, t_id))
+                
+                # 根据融合得分排序，取top10
+                combined_scores.sort(reverse=True, key=lambda x: x[0])
+                top10_t_ids = [t_id for _, t_id in combined_scores[:10]]
                 
                 # 转换回实体ID字符串
                 top10_entities = [mapper.id_to_entity[t_id] for t_id in top10_t_ids]
@@ -508,17 +660,25 @@ def main():
     print(f"测试数据大小: {len(test_dataset)}")
     print(f"开发数据大小: {len(dev_dataset)}")
     
-    # 构建实体和关系映射
+    # 构建实体和关系映射 - 使用增强版映射管理器
     print("正在构建实体和关系映射...")
-    mapper = EntityRelationMapper()
+    mapper = EnhancedEntityRelationMapper()
     mapper.build_mappings(train_dataset, test_dataset, dev_dataset)
+    
+    # 加载实体和关系的中文文本信息
+    print("正在加载实体和关系的中文文本信息...")
+    mapper.load_text_mappings(ENTITY_TEXT_PATH, RELATION_TEXT_PATH)
+    
+    # 初始化文本嵌入
+    print("正在初始化文本嵌入...")
+    mapper.init_text_embeddings(WORD2VEC_PATH)
     
     print(f"实体数量: {mapper.entity_count}")
     print(f"关系数量: {mapper.relation_count}")
     
-    # 创建模型
-    print("正在创建TransE模型...")
-    model = TransE(mapper.entity_count, mapper.relation_count, EMBEDDING_DIM)
+    # 创建模型 - 使用增强版TransE模型
+    print("正在创建增强版TransE模型...")
+    model = EnhancedTransE(mapper.entity_count, mapper.relation_count, EMBEDDING_DIM, mapper)
     model.to(device)
     
     # 训练模型
@@ -529,9 +689,9 @@ def main():
     print("\n训练完成，开始在开发集上评估模型性能...")
     evaluate(model, dev_dataset, mapper, device)
     
-    # 预测尾实体
+    # 预测尾实体 - 使用结合文本特征的预测函数
     # 可以通过max_head_entities参数控制处理的头实体个数，None表示处理全部
-    predict_tail_entities(model, test_dataset, mapper, device, max_head_entities)
+    predict_tail_entities_with_text(model, test_dataset, mapper, device, max_head_entities)
     
     print("任务完成！")
 

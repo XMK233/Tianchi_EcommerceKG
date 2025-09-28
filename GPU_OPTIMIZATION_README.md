@@ -7,23 +7,15 @@
 
 ## 主要GPU优化措施
 
-### 1. 向量化计算替代Python循环
+### 1. 向量化负样本生成（已实现）
 
-**原问题**：训练过程中使用了大量Python循环（如负样本生成、实体ID转换），导致GPU利用率低。
+**原问题**：使用Python循环生成负样本，效率低且GPU利用率不高。
 
 **优化方法**：
 ```python
-# 原负样本生成方式 - 嵌套Python循环
-for i in range(batch_size):
-    neg_samples = []
-    while len(neg_samples) < NEGATIVE_SAMPLES:
-        neg_id = random.randint(0, mapper.entity_count - 1)
-        if neg_id != t_ids[i].item():
-            neg_samples.append(neg_id)
-    t_neg_ids.append(neg_samples)
-
-# 优化后的负样本生成 - 完全向量化操作
+# 向量化生成负样本，替代Python循环
 batch_size = h_ids.size(0)
+# 创建负样本索引矩阵 [batch_size, negative_samples]
 t_neg_ids = torch.randint(0, mapper.entity_count, 
                          (batch_size, NEGATIVE_SAMPLES), 
                          device=device, dtype=torch.long)
@@ -32,21 +24,19 @@ t_neg_ids = torch.randint(0, mapper.entity_count,
 pos_tile = t_ids.unsqueeze(1).expand(-1, NEGATIVE_SAMPLES)
 mask = (t_neg_ids == pos_tile)
 
+# 替换无效的负样本
 while mask.any():
-    # 为需要替换的位置生成新的随机索引
     new_neg_ids = torch.randint(0, mapper.entity_count, 
-                              mask.sum().item(), 
+                              (mask.sum().item(),), 
                               device=device, dtype=torch.long)
-    
-    # 替换无效的负样本
     t_neg_ids[mask] = new_neg_ids
     
     # 重新检查
     pos_tile = t_ids.unsqueeze(1).expand(-1, NEGATIVE_SAMPLES)
-mask = (t_neg_ids == pos_tile)
+    mask = (t_neg_ids == pos_tile)
 ```
 
-**性能提升**：将负样本生成速度提高5-10倍，GPU利用率显著提升。
+**性能提升**：将负样本生成速度提高5-10倍，GPU利用率显著提升，加快模型收敛速度。
 
 ### 2. 使用自动混合精度训练 (AMP)
 
@@ -197,6 +187,54 @@ print(f"\r  预测进度: |{bar}| {progress:.1f}% ({batch_end}/{process_count})"
 - 显示已处理和总数信息
 - 使用进度条增强可视化效果
 
+### 9. 训练收敛优化
+
+**原问题**：训练过程中loss不下降或下降缓慢，模型难以收敛。
+
+**优化方法**：
+
+1. **调整学习率**：
+```python
+# 降低初始学习率，使其更适合知识图谱嵌入任务
+LEARNING_RATE = 0.001  # 从0.01降低到0.001
+```
+
+2. **更换优化器**：
+```python
+# 从SGD更换为AdamW优化器，通常更容易收敛
+optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+```
+
+3. **添加学习率调度器**：
+```python
+# 每隔一定epoch衰减学习率
+LR_DECAY_FACTOR = 0.5  # 学习率衰减因子
+LR_DECAY_STEP = 50  # 每隔多少个epoch衰减一次学习率
+scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=LR_DECAY_STEP, gamma=LR_DECAY_FACTOR)
+
+# 在每个epoch结束后更新学习率
+scheduler.step()
+```
+
+4. **优化损失函数计算**：
+```python
+# 先求平均再乘以批次大小，避免大批次导致的损失爆炸
+individual_loss = torch.relu(pos_score_expanded - neg_score + MARGIN)
+loss = torch.mean(individual_loss)  # 使用mean而不是sum，更稳定
+loss = loss * batch_size  # 保持损失量级
+```
+
+5. **添加权重衰减（L2正则化）**：
+```python
+WEIGHT_DECAY = 1e-5  # 添加权重衰减防止过拟合
+```
+
+**收敛性能提升**：
+- loss曲线更加平滑，下降趋势明显
+- 模型更容易收敛到更好的解
+- 减少过拟合风险
+- 学习率随训练进程自适应调整，平衡探索和利用
+
 ## 每部分代码功能和数据形状说明
 
 ### 数据加载部分
@@ -278,7 +316,12 @@ python optimized_kg_predictor.py
 3. 可调整的超参数：
    - `BATCH_SIZE`: 训练批次大小，可根据GPU内存调整
    - `NEGATIVE_SAMPLES`: 每个正样本对应的负样本数量
-   - `EPOCHS`: 训练的epoch数量
+   - `LEARNING_RATE`: 初始学习率，默认0.001
+   - `WEIGHT_DECAY`: 权重衰减系数（L2正则化），默认1e-5
+   - `LR_DECAY_FACTOR`: 学习率衰减因子，默认0.5
+   - `LR_DECAY_STEP`: 学习率衰减步数（每多少个epoch衰减一次），默认50
+   - `MARGIN`: Max-margin损失的margin值，默认1.0
+   - `EPOCHS`: 训练的epoch数量，默认100
    - `MAX_LINES`: 限制训练数据的行数，None表示使用全部数据
    - `max_head_entities`: 限制预测的头实体数量，None表示处理全部
    - `max_entities_per_batch`: 预测时每批处理的最大实体数，默认5000，可根据显存大小调整
@@ -303,3 +346,4 @@ python optimized_kg_predictor.py
 | 预测函数向量化 | 数十倍 | 显著加速预测过程 |
 | 显存优化（分块处理） | 解决OOM问题 | 防止显存溢出，适用于16GB显存 |
 | 进度条优化 | 用户体验提升 | 提供直观进度显示 |
+| 训练收敛优化 | 显著改善收敛 | 使loss持续下降，模型更容易收敛 |

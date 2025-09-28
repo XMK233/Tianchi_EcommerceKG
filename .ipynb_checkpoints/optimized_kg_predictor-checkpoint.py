@@ -22,23 +22,30 @@ set_seed()
 # 数据路径
 TRAIN_FILE_PATH = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/originalData/OpenBG500/OpenBG500_train.tsv"
 TEST_FILE_PATH = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/originalData/OpenBG500/OpenBG500_test.tsv"
-OUTPUT_FILE_PATH = "./rst.tsv"
+DEV_FILE_PATH = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/originalData/OpenBG500/OpenBG500_dev.tsv" # 开发集路径
+OUTPUT_FILE_PATH = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/preprocessedData/OpenBG500_test.tsv"
 
 # 超参数
 EMBEDDING_DIM = 200  # 实体和关系嵌入的维度
-LEARNING_RATE = 0.01  # 学习率
+LEARNING_RATE = 0.001  # 学习率（降低学习率以改善收敛）
 MARGIN = 1.0  # Max-margin损失的margin值
 BATCH_SIZE = 1024  # 训练批次大小
 NEGATIVE_SAMPLES = 5  # 每个正样本对应的负样本数量
+WEIGHT_DECAY = 1e-5  # 权重衰减（L2正则化）
 
 MAX_LINES = None  # 限制训练数据的行数，None表示使用全部数据
-epochs = 1  # 训练的epoch数量
+epochs = 5  # 训练的epoch数量
 max_head_entities = None  # 限制预测的头实体数量，None表示处理全部
+
+# 学习率调度器参数
+LR_DECAY_FACTOR = 0.5  # 学习率衰减因子
+LR_DECAY_STEP = 50  # 每隔多少个epoch衰减一次学习率
 
 # 数据加载类 - 优化版：预处理实体和关系ID以减少运行时计算
 class KnowledgeGraphDataset(Dataset):
-    def __init__(self, file_path, is_test=False, max_lines=None, mapper=None):
+    def __init__(self, file_path, is_test=False, is_dev=False, max_lines=None, mapper=None):
         self.is_test = is_test
+        self.is_dev = is_dev
         self.triples = []
         self.mapper = mapper
         
@@ -58,7 +65,7 @@ class KnowledgeGraphDataset(Dataset):
                         self.triples.append((h, r, None))
                         line_count += 1
                 else:
-                    # 训练文件有完整的三元组
+                    # 训练和开发文件有完整的三元组
                     if len(parts) >= 3:
                         h, r, t = parts[0], parts[1], parts[2]
                         self.triples.append((h, r, t))
@@ -112,7 +119,7 @@ class EntityRelationMapper:
             self.id_to_relation[self.relation_count] = relation
             self.relation_count += 1
     
-    def build_mappings(self, train_dataset, test_dataset):
+    def build_mappings(self, train_dataset, test_dataset, dev_dataset=None):
         # 从训练数据构建映射
         for h, r, t in train_dataset.triples:
             self.add_entity(h)
@@ -123,6 +130,13 @@ class EntityRelationMapper:
         for h, r, _ in test_dataset.triples:
             self.add_entity(h)
             self.add_relation(r)
+        
+        # 从开发集构建映射（确保所有实体和关系都被包含）
+        if dev_dataset is not None:
+            for h, r, t in dev_dataset.triples:
+                self.add_entity(h)
+                self.add_entity(t)
+                self.add_relation(r)
 
 # TransE模型实现
 class TransE(nn.Module):
@@ -178,8 +192,11 @@ def train_model(model, train_dataset, mapper, device):
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, 
                              collate_fn=custom_collate, pin_memory=True, num_workers=8)
     
-    # 定义优化器和损失函数
-    optimizer = optim.SGD(model.parameters(), lr=LEARNING_RATE, momentum=0.9)
+    # 定义优化器 - 改为AdamW优化器，通常比SGD更容易收敛
+    optimizer = optim.AdamW(model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    
+    # 添加学习率调度器
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=LR_DECAY_STEP, gamma=LR_DECAY_FACTOR)
     
     # 启用CUDA自动混合精度训练，减少内存使用并加速训练
     scaler = torch.cuda.amp.GradScaler(enabled=torch.cuda.is_available())
@@ -238,7 +255,13 @@ def train_model(model, train_dataset, mapper, device):
                 # 计算损失（基于margin的max-margin损失）
                 # 将pos_score扩展为与neg_score相同的维度
                 pos_score_expanded = pos_score.unsqueeze(1).expand_as(neg_score)
-                loss = torch.sum(torch.relu(pos_score_expanded - neg_score + MARGIN))
+                
+                # 计算每个样本的损失，并按批次大小进行平均，避免大批次带来的损失爆炸
+                individual_loss = torch.relu(pos_score_expanded - neg_score + MARGIN)
+                loss = torch.mean(individual_loss)  # 使用mean而不是sum，更稳定
+                
+                # 乘以批次大小以保持损失量级，便于与之前的训练比较
+                loss = loss * batch_size
             
             # 反向传播和优化 - 使用scaler进行梯度缩放
             optimizer.zero_grad()
@@ -256,10 +279,113 @@ def train_model(model, train_dataset, mapper, device):
                 progress = (batch_idx + 1) / len(train_loader) * 100
                 print(f"  Batch {batch_idx+1}/{len(train_loader)} - Loss: {loss.item():.4f} - Progress: {progress:.1f}%", end='\r')
         
+        # 每个epoch结束后更新学习率
+        scheduler.step()
+        
         # 每个epoch结束后打印平均损失和训练速度
         avg_loss = total_loss / len(train_loader)
         epoch_time = time.time() - epoch_start_time
-        print(f"\nEpoch {epoch+1}/{epochs} - Average Loss: {avg_loss:.4f} - Time: {epoch_time:.2f}s")
+        print(f"\nEpoch {epoch+1}/{epochs} - Average Loss: {avg_loss:.4f} - LR: {scheduler.get_last_lr()[0]:.6f} - Time: {epoch_time:.2f}s")
+
+# 评测函数 - 优化版：向量化计算提升评估速度
+def evaluate(model, dev_dataset, mapper, device, batch_size=128, max_entities_per_batch=10000):
+    model.eval()
+    hits_at_1 = 0
+    hits_at_3 = 0
+    hits_at_10 = 0
+    mrr_score = 0
+    total_count = 0
+    
+    total_dev_triples = len(dev_dataset.triples)
+    print(f"\n开始在开发集上评估模型...")
+    print(f"将评估 {total_dev_triples} 个三元组")
+    
+    with torch.no_grad():
+        # 创建批次进行处理
+        for batch_start in range(0, total_dev_triples, batch_size):
+            batch_end = min(batch_start + batch_size, total_dev_triples)
+            batch_triples = dev_dataset.triples[batch_start:batch_end]
+            current_batch_size = len(batch_triples)
+            
+            # 获取批次中的头实体、关系和尾实体
+            h_list = [h for h, _, _ in batch_triples]
+            r_list = [r for _, r, _ in batch_triples]
+            t_list = [t for _, _, t in batch_triples]
+            
+            # 转换为ID和张量
+            h_ids = torch.tensor([mapper.entity_to_id[h] for h in h_list], device=device)
+            r_ids = torch.tensor([mapper.relation_to_id[r] for r in r_list], device=device)
+            t_ids = torch.tensor([mapper.entity_to_id[t] for t in t_list], device=device)
+            
+            # 获取嵌入向量并计算h + r
+            h_emb = model.entity_embeddings(h_ids)  # [current_batch_size, embedding_dim]
+            r_emb = model.relation_embeddings(r_ids)  # [current_batch_size, embedding_dim]
+            h_plus_r = h_emb + r_emb  # [current_batch_size, embedding_dim]
+            
+            # 分块处理实体，避免一次性加载所有实体导致显存溢出
+            batch_scores = torch.zeros(current_batch_size, mapper.entity_count, device=device)
+            
+            # 分块计算得分 - 向量化实现
+            for entity_start in range(0, mapper.entity_count, max_entities_per_batch):
+                entity_end = min(entity_start + max_entities_per_batch, mapper.entity_count)
+                entity_chunk_size = entity_end - entity_start
+                
+                # 获取当前块的实体嵌入
+                entity_ids = torch.arange(entity_start, entity_end, device=device)
+                entity_embeddings = model.entity_embeddings(entity_ids)  # [entity_chunk_size, embedding_dim]
+                
+                # 计算当前块的得分 - 向量化操作
+                h_plus_r_expanded = h_plus_r.unsqueeze(1)  # [current_batch_size, 1, embedding_dim]
+                chunk_scores = torch.norm(
+                    h_plus_r_expanded - entity_embeddings.unsqueeze(0), 
+                    p=1, 
+                    dim=2
+                )  # [current_batch_size, entity_chunk_size]
+                
+                # 存储到完整得分矩阵中
+                batch_scores[:, entity_start:entity_end] = chunk_scores
+                
+                # 清理中间变量，释放显存
+                del entity_embeddings, chunk_scores
+            
+            # 查找每个样本中正确尾实体的得分
+            correct_scores = torch.gather(batch_scores, 1, t_ids.view(-1, 1))  # [current_batch_size, 1]
+            
+            # 计算排名（得分越低排名越高） - 通过向量化比较实现
+            # 计算有多少实体得分比正确实体低（排名即这个数量+1）
+            num_better_entities = (batch_scores < correct_scores).sum(dim=1)  # [current_batch_size]
+            ranks = num_better_entities + 1  # [current_batch_size] - 排名从1开始
+            
+            # 计算指标
+            hits_at_1 += (ranks == 1).sum().item()
+            hits_at_3 += (ranks <= 3).sum().item()
+            hits_at_10 += (ranks <= 10).sum().item()
+            mrr_score += (1.0 / ranks).sum().item()
+            total_count += current_batch_size
+            
+            # 显示进度
+            progress = min(total_count, total_dev_triples) / total_dev_triples * 100
+            if total_count % 500 == 0 or total_count >= total_dev_triples:
+                print(f"  评估进度: {progress:.1f}% ({min(total_count, total_dev_triples)}/{total_dev_triples})")
+            
+            # 清理显存
+            del h_emb, r_emb, h_plus_r, batch_scores, correct_scores, num_better_entities, ranks
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+    
+    # 计算最终指标
+    hits_at_1 = hits_at_1 / total_count
+    hits_at_3 = hits_at_3 / total_count
+    hits_at_10 = hits_at_10 / total_count
+    mrr_score = mrr_score / total_count
+    
+    print(f"\n开发集评估结果:")
+    print(f"HITS@1: {hits_at_1:.4f}")
+    print(f"HITS@3: {hits_at_3:.4f}")
+    print(f"HITS@10: {hits_at_10:.4f}")
+    print(f"MRR: {mrr_score:.4f}")
+    
+    return hits_at_1, hits_at_3, hits_at_10, mrr_score
 
 # 预测函数 - 优化版本（向量化计算，带进度条和显存优化）
 def predict_tail_entities(model, test_dataset, mapper, device, max_head_entities=None, batch_size=128, max_entities_per_batch=10000):
@@ -360,9 +486,9 @@ def main():
     # 设置CUDA优化选项
     if torch.cuda.is_available():
         # 启用cuDNN基准测试以选择最佳卷积算法
-        torch.backends.cudnn.benchmark = True
+        # torch.backends.cudnn.benchmark = True
         # 如果内存不足，可以考虑禁用这个选项
-        # torch.backends.cudnn.enabled = False
+        torch.backends.cudnn.enabled = False
     
     # 检查CUDA是否可用
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -372,14 +498,16 @@ def main():
     print("正在加载数据集...")
     train_dataset = KnowledgeGraphDataset(TRAIN_FILE_PATH, max_lines=MAX_LINES)
     test_dataset = KnowledgeGraphDataset(TEST_FILE_PATH, is_test=True)
+    dev_dataset = KnowledgeGraphDataset(DEV_FILE_PATH, is_dev=True)  # 加载开发集
     
     print(f"训练数据大小: {len(train_dataset)}")
     print(f"测试数据大小: {len(test_dataset)}")
+    print(f"开发数据大小: {len(dev_dataset)}")
     
     # 构建实体和关系映射
     print("正在构建实体和关系映射...")
     mapper = EntityRelationMapper()
-    mapper.build_mappings(train_dataset, test_dataset)
+    mapper.build_mappings(train_dataset, test_dataset, dev_dataset)
     
     print(f"实体数量: {mapper.entity_count}")
     print(f"关系数量: {mapper.relation_count}")
@@ -392,6 +520,10 @@ def main():
     # 训练模型
     print("开始训练模型...")
     train_model(model, train_dataset, mapper, device)
+    
+    # 在开发集上评估模型
+    print("\n训练完成，开始在开发集上评估模型性能...")
+    evaluate(model, dev_dataset, mapper, device)
     
     # 预测尾实体
     # 可以通过max_head_entities参数控制处理的头实体个数，None表示处理全部
