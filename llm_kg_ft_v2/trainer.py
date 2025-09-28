@@ -211,14 +211,25 @@ class KGTrainer:
                 # 首选方案：使用eos_token作为pad_token
                 if self.tokenizer.eos_token is not None:
                     self.tokenizer.pad_token = self.tokenizer.eos_token
+                    # 确保同时设置pad_token_id
+                    if getattr(self.tokenizer, 'pad_token_id', None) is None:
+                        object.__setattr__(self.tokenizer, 'pad_token_id', self.tokenizer.eos_token_id)
                 # 备选方案：使用unk_token作为pad_token
                 elif hasattr(self.tokenizer, 'unk_token') and self.tokenizer.unk_token is not None:
                     self.tokenizer.pad_token = self.tokenizer.unk_token
+                    if getattr(self.tokenizer, 'pad_token_id', None) is None:
+                        object.__setattr__(self.tokenizer, 'pad_token_id', self.tokenizer.unk_token_id)
                 # 备选方案：使用已有的token作为pad_token
                 else:
                     # 对于Qwen模型，尝试使用一个不会引发异常的安全方式设置pad_token
                     # 尝试使用tokenizer内部可能已有的pad_token表示
                     self.tokenizer.pad_token = "<|endoftext|>" if hasattr(self.tokenizer, "eos_token") and self.tokenizer.eos_token else "<|padding|>"
+                    # 确保同时设置pad_token_id
+                    if getattr(self.tokenizer, 'pad_token_id', None) is None:
+                        # 获取vocab_size作为参考设置一个安全的默认值
+                        vocab_size = len(self.tokenizer.get_vocab()) if hasattr(self.tokenizer, 'get_vocab') else 0
+                        fake_pad_token_id = vocab_size if vocab_size > 0 else 0
+                        object.__setattr__(self.tokenizer, 'pad_token_id', fake_pad_token_id)
             except Exception as e:
                 # 如果所有方法都失败，记录错误但不抛出异常，继续执行
                 logger.error(f"在tokenize_function中设置pad_token时出错: {str(e)}")
@@ -228,18 +239,25 @@ class KGTrainer:
         texts = [f"{inp}\n{out}" for inp, out in zip(examples["input"], examples["output"])]
         
         # 使用分词器处理
-        # 为了解决pad_token_id为None的问题，我们使用padding='longest'而不是'max_length'
-        # 这样可以避免库内部对pad_token_id的检查
+        # 使用padding='max_length'来确保所有批次的张量长度一致
+        # 这可以解决训练时出现的张量长度不匹配错误
         tokenized = self.tokenizer(
             texts,
-            padding="longest",
+            padding="max_length",  # 强制使用最大长度padding以确保所有样本长度一致
             truncation=True,
             max_length=self.config.max_seq_length,
             return_tensors="pt"
         )
         
-        # 设置标签（与input_ids相同，但忽略padding部分）
+        # 设置标签（与input_ids相同）
         tokenized["labels"] = tokenized["input_ids"].clone()
+        
+        # 确保所有张量形状一致
+        # 检查是否有任何张量长度不一致的情况
+        if "attention_mask" in tokenized:
+            assert tokenized["input_ids"].shape == tokenized["attention_mask"].shape, "张量形状不一致"
+            assert tokenized["input_ids"].shape == tokenized["labels"].shape, "标签与输入张量形状不一致"
+        
         return tokenized
     
     def train(self):
@@ -256,46 +274,125 @@ class KGTrainer:
             "output": [data[1] for data in training_data]
         })
         
+        # 数据采样：只使用10000行数据进行训练
+        if len(train_dataset) > 10000:
+            logger.info(f"原始训练数据规模: {len(train_dataset)}，采样10000行用于训练")
+            train_dataset = train_dataset.select(range(10000))
+        
         # 分词处理
-        # 对于CUDA环境，我们需要禁用多进程，因为datasets库的多进程实现与CUDA存在兼容性问题
+        # 动态设置多进程数量：尝试使用更多进程加速处理，但在CUDA环境中保持单进程
+        import torch
+        num_proc = 1  # 默认单进程
+        if not torch.cuda.is_available() and hasattr(train_dataset, 'num_rows') and train_dataset.num_rows > 1000:
+            # 非CUDA环境且数据量较大时，尝试使用多进程
+            import multiprocessing
+            num_proc = min(8, multiprocessing.cpu_count())  # 最多使用8个进程或可用CPU核心数
+            logger.info(f"使用多进程加速分词处理: {num_proc}个进程")
+        else:
+            logger.info("使用单进程进行分词处理")
+            
         tokenized_train_dataset = train_dataset.map(
             self.tokenize_function,
             batched=True,
             remove_columns=["input", "output"],
-            num_proc=1  # 禁用多进程以避免CUDA初始化问题
+            num_proc=num_proc,
+            load_from_cache_file=True  # 启用缓存以加速后续运行
         )
         
-        # 配置训练参数
-        training_args = TrainingArguments(
-            output_dir=self.config.output_dir,
-            num_train_epochs=self.config.num_epochs,
-            per_device_train_batch_size=self.config.batch_size,
-            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-            learning_rate=self.config.learning_rate,
-            warmup_ratio=self.config.warmup_ratio,
-            fp16=self.config.fp16,
-            logging_dir=self.config.log_dir,
-            logging_steps=10,
-            save_steps=500,
-            save_total_limit=3,
-            report_to="wandb" if os.environ.get("WANDB_API_KEY") else "none",
-            deepspeed="./ds_config.json" if self.config.use_deepspeed else None,
-            optim="adamw_torch",
-            lr_scheduler_type="linear",
-            weight_decay=0.01,
-            push_to_hub=False,
-            evaluation_strategy="no",  # 单独进行验证
-            do_eval=False
-        )
+        # 配置训练参数 - 使用动态参数处理以确保兼容性
+        training_args_kwargs = {
+            'output_dir': self.config.output_dir,
+            'num_train_epochs': self.config.num_epochs,
+            'per_device_train_batch_size': self.config.batch_size,
+            'gradient_accumulation_steps': self.config.gradient_accumulation_steps,
+            'learning_rate': self.config.learning_rate,
+            'warmup_ratio': self.config.warmup_ratio,
+            'fp16': self.config.fp16,
+            'logging_dir': self.config.log_dir,
+            'logging_steps': 10,
+            'save_steps': 500,
+            'save_total_limit': 3,
+            'report_to': "wandb" if os.environ.get("WANDB_API_KEY") else "none",
+            'deepspeed': "./ds_config.json" if self.config.use_deepspeed else None,
+            'optim': "adamw_torch",
+            'lr_scheduler_type': "linear",
+            'weight_decay': 0.01,
+            'push_to_hub': False,
+            'do_eval': False
+        }
+        
+        # 处理评估策略参数的兼容性
+        try:
+            import inspect
+            training_args_signature = inspect.signature(TrainingArguments.__init__)
+            if 'eval_strategy' in training_args_signature.parameters:
+                training_args_kwargs['eval_strategy'] = "no"  # 新版本参数
+                logger.info("使用eval_strategy参数配置评估策略")
+            elif 'evaluation_strategy' in training_args_signature.parameters:
+                training_args_kwargs['evaluation_strategy'] = "no"  # 旧版本参数
+                logger.info("使用evaluation_strategy参数配置评估策略")
+        except Exception as e:
+            logger.warning(f"无法自动检测评估策略参数名: {str(e)}")
+            # 默认使用eval_strategy
+            training_args_kwargs['eval_strategy'] = "no"
+        
+        training_args = TrainingArguments(**training_args_kwargs)
         
         # 数据收集器
-        # 为了解决pad_token_id为None的问题，我们使用一个自定义的padding策略
-        # 使用ignore_pad_token_for_loss=True避免在计算loss时考虑padding
-        data_collator = DataCollatorForLanguageModeling(
-            tokenizer=self.tokenizer,
-            mlm=False,
-            ignore_pad_token_for_loss=True  # 避免在计算loss时考虑padding
-        )
+        # 为了解决张量长度不匹配问题，我们使用自定义的数据收集器
+        class SafeDataCollator(DataCollatorForLanguageModeling):
+            def __call__(self, features):
+                # 确保所有样本都具有相同的长度
+                # 提取所有input_ids的长度
+                lengths = [len(feature["input_ids"]) for feature in features]
+                max_length = max(lengths)
+                
+                # 对每个样本进行padding，确保长度一致
+                for feature in features:
+                    if len(feature["input_ids"]) < max_length:
+                        # 计算需要添加的padding数量
+                        padding_length = max_length - len(feature["input_ids"])
+                        pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+                        
+                        # 对input_ids进行padding
+                        feature["input_ids"] += [pad_token_id] * padding_length
+                        
+                        # 对attention_mask进行padding
+                        if "attention_mask" in feature:
+                            feature["attention_mask"] += [0] * padding_length
+                        
+                        # 对labels进行padding
+                        if "labels" in feature:
+                            if self.ignore_pad_token_for_loss:
+                                # 如果启用了ignore_pad_token_for_loss，则使用-100作为padding值
+                                feature["labels"] += [-100] * padding_length
+                            else:
+                                # 否则使用与input_ids相同的padding值
+                                feature["labels"] += [pad_token_id] * padding_length
+                
+                # 调用父类的__call__方法
+                return super().__call__(features)
+        
+        # 使用动态参数处理以确保兼容性
+        collator_kwargs = {
+            'tokenizer': self.tokenizer,
+            'mlm': False
+        }
+        
+        # 尝试添加ignore_pad_token_for_loss参数（仅在较新版本transformers中可用）
+        try:
+            # 使用inspect检查DataCollatorForLanguageModeling是否接受ignore_pad_token_for_loss参数
+            import inspect
+            collator_signature = inspect.signature(DataCollatorForLanguageModeling.__init__)
+            if 'ignore_pad_token_for_loss' in collator_signature.parameters:
+                collator_kwargs['ignore_pad_token_for_loss'] = True
+                logger.info("使用ignore_pad_token_for_loss=True避免在计算loss时考虑padding")
+        except Exception as e:
+            logger.info(f"未启用ignore_pad_token_for_loss参数: {str(e)}")
+        
+        # 使用我们自定义的安全数据收集器
+        data_collator = SafeDataCollator(**collator_kwargs)
+        logger.info("使用自定义的安全数据收集器，确保所有张量长度一致")
         
         # 创建Trainer
         trainer = Trainer(

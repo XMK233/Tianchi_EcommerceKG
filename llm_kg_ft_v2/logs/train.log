@@ -172,3 +172,110 @@ Trying to resume download...
 2025-09-28 13:20:33,515 - INFO - We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
 2025-09-28 13:20:46,641 - INFO - 可训练参数: 1.57M (0.13%)
 2025-09-28 13:20:46,643 - INFO - 模型加载完成，耗时: 16.43秒
+2025-09-28 14:03:51,149 - INFO - 开始加载模型: Qwen/Qwen-1_8B-Chat
+2025-09-28 14:03:52,547 - INFO - eos_token和unk_token都不存在，尝试使用安全的方式设置pad_token
+2025-09-28 14:03:52,547 - INFO - 已设置pad_token为默认安全值: <|padding|>
+2025-09-28 14:03:52,547 - WARNING - pad_token_id仍然为None，尝试使用最安全的方式解决...
+2025-09-28 14:03:52,548 - INFO - 已设置假的pad_token_id: 151643
+2025-09-28 14:03:54,360 - WARNING - The model is automatically converting to bf16 for faster inference. If you want to disable the automatic precision, please manually add bf16/fp16/fp32=True to "AutoModelForCausalLM.from_pretrained".
+2025-09-28 14:03:54,360 - WARNING - Try importing flash-attention for faster inference...
+2025-09-28 14:03:54,361 - WARNING - Warning: import flash_attn rotary fail, please install FlashAttention rotary to get higher efficiency https://github.com/Dao-AILab/flash-attention/tree/main/csrc/rotary
+2025-09-28 14:03:54,361 - WARNING - Warning: import flash_attn rms_norm fail, please install FlashAttention layer_norm to get higher efficiency https://github.com/Dao-AILab/flash-attention/tree/main/csrc/layer_norm
+2025-09-28 14:03:54,362 - WARNING - Warning: import flash_attn fail, please install FlashAttention to get higher efficiency https://github.com/Dao-AILab/flash-attention
+2025-09-28 14:03:54,641 - INFO - We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
+2025-09-28 14:04:07,260 - INFO - 可训练参数: 1.57M (0.13%)
+2025-09-28 14:04:07,263 - INFO - 模型加载完成，耗时: 16.11秒
+2025-09-28 14:04:15,134 - INFO - 原始训练数据规模: 2485100，采样10000行用于训练
+2025-09-28 14:04:15,135 - INFO - 使用单进程进行分词处理
+2025-09-28 14:07:48,495 - INFO - 开始加载模型: Qwen/Qwen-1_8B-Chat
+2025-09-28 14:07:50,036 - INFO - eos_token和unk_token都不存在，尝试使用安全的方式设置pad_token
+2025-09-28 14:07:50,037 - INFO - 已设置pad_token为默认安全值: <|padding|>
+2025-09-28 14:07:50,037 - WARNING - pad_token_id仍然为None，尝试使用最安全的方式解决...
+2025-09-28 14:07:50,037 - INFO - 已设置假的pad_token_id: 151643
+2025-09-28 14:07:51,658 - WARNING - The model is automatically converting to bf16 for faster inference. If you want to disable the automatic precision, please manually add bf16/fp16/fp32=True to "AutoModelForCausalLM.from_pretrained".
+2025-09-28 14:07:51,658 - WARNING - Try importing flash-attention for faster inference...
+2025-09-28 14:07:51,659 - WARNING - Warning: import flash_attn rotary fail, please install FlashAttention rotary to get higher efficiency https://github.com/Dao-AILab/flash-attention/tree/main/csrc/rotary
+2025-09-28 14:07:51,659 - WARNING - Warning: import flash_attn rms_norm fail, please install FlashAttention layer_norm to get higher efficiency https://github.com/Dao-AILab/flash-attention/tree/main/csrc/layer_norm
+2025-09-28 14:07:51,660 - WARNING - Warning: import flash_attn fail, please install FlashAttention to get higher efficiency https://github.com/Dao-AILab/flash-attention
+2025-09-28 14:07:51,930 - INFO - We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
+2025-09-28 14:08:05,178 - INFO - 可训练参数: 1.57M (0.13%)
+2025-09-28 14:08:05,183 - INFO - 模型加载完成，耗时: 16.69秒
+2025-09-28 14:08:13,080 - INFO - 原始训练数据规模: 2485100，采样10000行用于训练
+2025-09-28 14:08:13,081 - INFO - 使用单进程进行分词处理
+2025-09-28 14:08:20,741 - INFO - 使用eval_strategy参数配置评估策略
+2025-09-28 14:08:22,204 - INFO - 开始模型训练
+2025-09-28 14:08:22,419 - WARNING - Gradient accumulation steps mismatch: GradientAccumulationPlugin has 1, DeepSpeed config has 4. Using DeepSpeed's value.
+2025-09-28 14:10:22,073 - INFO - 开始加载模型: Qwen/Qwen-1_8B-Chat
+2025-09-28 14:10:23,511 - INFO - eos_token和unk_token都不存在，尝试使用安全的方式设置pad_token
+2025-09-28 14:10:23,512 - INFO - 已设置pad_token为默认安全值: <|padding|>
+2025-09-28 14:10:23,512 - WARNING - pad_token_id仍然为None，尝试使用最安全的方式解决...
+2025-09-28 14:10:23,513 - INFO - 已设置假的pad_token_id: 151643
+2025-09-28 14:10:25,018 - WARNING - The model is automatically converting to bf16 for faster inference. If you want to disable the automatic precision, please manually add bf16/fp16/fp32=True to "AutoModelForCausalLM.from_pretrained".
+2025-09-28 14:10:25,019 - WARNING - Try importing flash-attention for faster inference...
+2025-09-28 14:10:25,019 - WARNING - Warning: import flash_attn rotary fail, please install FlashAttention rotary to get higher efficiency https://github.com/Dao-AILab/flash-attention/tree/main/csrc/rotary
+2025-09-28 14:10:25,020 - WARNING - Warning: import flash_attn rms_norm fail, please install FlashAttention layer_norm to get higher efficiency https://github.com/Dao-AILab/flash-attention/tree/main/csrc/layer_norm
+2025-09-28 14:10:25,020 - WARNING - Warning: import flash_attn fail, please install FlashAttention to get higher efficiency https://github.com/Dao-AILab/flash-attention
+2025-09-28 14:10:25,280 - INFO - We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
+2025-09-28 14:10:37,530 - INFO - 可训练参数: 1.57M (0.13%)
+2025-09-28 14:10:37,531 - INFO - 模型加载完成，耗时: 15.46秒
+2025-09-28 14:10:45,217 - INFO - 原始训练数据规模: 2485100，采样10000行用于训练
+2025-09-28 14:10:45,218 - INFO - 使用单进程进行分词处理
+2025-09-28 14:10:53,270 - INFO - 使用eval_strategy参数配置评估策略
+2025-09-28 14:10:54,439 - INFO - 开始模型训练
+2025-09-28 14:10:54,644 - WARNING - Gradient accumulation steps mismatch: GradientAccumulationPlugin has 1, DeepSpeed config has 4. Using DeepSpeed's value.
+2025-09-28 14:11:24,209 - INFO - 开始加载模型: Qwen/Qwen-1_8B-Chat
+2025-09-28 14:11:25,389 - INFO - eos_token和unk_token都不存在，尝试使用安全的方式设置pad_token
+2025-09-28 14:11:25,390 - INFO - 已设置pad_token为默认安全值: <|padding|>
+2025-09-28 14:11:25,390 - WARNING - pad_token_id仍然为None，尝试使用最安全的方式解决...
+2025-09-28 14:11:25,391 - INFO - 已设置假的pad_token_id: 151643
+2025-09-28 14:11:26,900 - WARNING - The model is automatically converting to bf16 for faster inference. If you want to disable the automatic precision, please manually add bf16/fp16/fp32=True to "AutoModelForCausalLM.from_pretrained".
+2025-09-28 14:11:26,900 - WARNING - Try importing flash-attention for faster inference...
+2025-09-28 14:11:26,901 - WARNING - Warning: import flash_attn rotary fail, please install FlashAttention rotary to get higher efficiency https://github.com/Dao-AILab/flash-attention/tree/main/csrc/rotary
+2025-09-28 14:11:26,901 - WARNING - Warning: import flash_attn rms_norm fail, please install FlashAttention layer_norm to get higher efficiency https://github.com/Dao-AILab/flash-attention/tree/main/csrc/layer_norm
+2025-09-28 14:11:26,902 - WARNING - Warning: import flash_attn fail, please install FlashAttention to get higher efficiency https://github.com/Dao-AILab/flash-attention
+2025-09-28 14:11:27,160 - INFO - We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
+2025-09-28 14:11:39,352 - INFO - 可训练参数: 1.57M (0.13%)
+2025-09-28 14:11:39,353 - INFO - 模型加载完成，耗时: 15.14秒
+2025-09-28 14:11:47,076 - INFO - 原始训练数据规模: 2485100，采样10000行用于训练
+2025-09-28 14:11:47,078 - INFO - 使用单进程进行分词处理
+2025-09-28 14:11:55,200 - INFO - 使用eval_strategy参数配置评估策略
+2025-09-28 14:11:56,274 - INFO - 开始模型训练
+2025-09-28 14:11:56,479 - WARNING - Gradient accumulation steps mismatch: GradientAccumulationPlugin has 1, DeepSpeed config has 4. Using DeepSpeed's value.
+2025-09-28 14:13:53,781 - INFO - 开始加载模型: Qwen/Qwen-1_8B-Chat
+2025-09-28 14:13:55,210 - INFO - eos_token和unk_token都不存在，尝试使用安全的方式设置pad_token
+2025-09-28 14:13:55,210 - INFO - 已设置pad_token为默认安全值: <|padding|>
+2025-09-28 14:13:55,211 - WARNING - pad_token_id仍然为None，尝试使用最安全的方式解决...
+2025-09-28 14:13:55,212 - INFO - 已设置假的pad_token_id: 151643
+2025-09-28 14:13:56,976 - WARNING - The model is automatically converting to bf16 for faster inference. If you want to disable the automatic precision, please manually add bf16/fp16/fp32=True to "AutoModelForCausalLM.from_pretrained".
+2025-09-28 14:13:56,976 - WARNING - Try importing flash-attention for faster inference...
+2025-09-28 14:13:56,977 - WARNING - Warning: import flash_attn rotary fail, please install FlashAttention rotary to get higher efficiency https://github.com/Dao-AILab/flash-attention/tree/main/csrc/rotary
+2025-09-28 14:13:56,977 - WARNING - Warning: import flash_attn rms_norm fail, please install FlashAttention layer_norm to get higher efficiency https://github.com/Dao-AILab/flash-attention/tree/main/csrc/layer_norm
+2025-09-28 14:13:56,978 - WARNING - Warning: import flash_attn fail, please install FlashAttention to get higher efficiency https://github.com/Dao-AILab/flash-attention
+2025-09-28 14:13:57,240 - INFO - We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
+2025-09-28 14:14:10,497 - INFO - 可训练参数: 1.57M (0.13%)
+2025-09-28 14:14:10,499 - INFO - 模型加载完成，耗时: 16.72秒
+2025-09-28 14:14:17,988 - INFO - 原始训练数据规模: 2485100，采样10000行用于训练
+2025-09-28 14:14:17,990 - INFO - 使用单进程进行分词处理
+2025-09-28 14:14:25,734 - INFO - 使用eval_strategy参数配置评估策略
+2025-09-28 14:14:26,773 - INFO - 开始模型训练
+2025-09-28 14:14:26,982 - WARNING - Gradient accumulation steps mismatch: GradientAccumulationPlugin has 1, DeepSpeed config has 4. Using DeepSpeed's value.
+2025-09-28 14:18:42,698 - INFO - 开始加载模型: Qwen/Qwen-1_8B-Chat
+2025-09-28 14:18:43,906 - INFO - eos_token和unk_token都不存在，尝试使用安全的方式设置pad_token
+2025-09-28 14:18:43,907 - INFO - 已设置pad_token为默认安全值: <|padding|>
+2025-09-28 14:18:43,907 - WARNING - pad_token_id仍然为None，尝试使用最安全的方式解决...
+2025-09-28 14:18:43,907 - INFO - 已设置假的pad_token_id: 151643
+2025-09-28 14:18:46,015 - WARNING - The model is automatically converting to bf16 for faster inference. If you want to disable the automatic precision, please manually add bf16/fp16/fp32=True to "AutoModelForCausalLM.from_pretrained".
+2025-09-28 14:18:46,015 - WARNING - Try importing flash-attention for faster inference...
+2025-09-28 14:18:46,016 - WARNING - Warning: import flash_attn rotary fail, please install FlashAttention rotary to get higher efficiency https://github.com/Dao-AILab/flash-attention/tree/main/csrc/rotary
+2025-09-28 14:18:46,016 - WARNING - Warning: import flash_attn rms_norm fail, please install FlashAttention layer_norm to get higher efficiency https://github.com/Dao-AILab/flash-attention/tree/main/csrc/layer_norm
+2025-09-28 14:18:46,017 - WARNING - Warning: import flash_attn fail, please install FlashAttention to get higher efficiency https://github.com/Dao-AILab/flash-attention
+2025-09-28 14:18:46,286 - INFO - We will use 90% of the memory on device 0 for storing the model, and 10% for the buffer to avoid OOM. You can set `max_memory` in to a higher value to use more memory (at your own risk).
+2025-09-28 14:18:58,985 - INFO - 可训练参数: 1.57M (0.13%)
+2025-09-28 14:18:58,985 - INFO - 模型加载完成，耗时: 16.29秒
+2025-09-28 14:19:06,674 - INFO - 原始训练数据规模: 2485100，采样10000行用于训练
+2025-09-28 14:19:06,675 - INFO - 使用单进程进行分词处理
+2025-09-28 14:19:15,609 - INFO - 使用eval_strategy参数配置评估策略
+2025-09-28 14:19:15,635 - INFO - 使用自定义的安全数据收集器，确保所有张量长度一致
+2025-09-28 14:19:16,657 - INFO - 开始模型训练
+2025-09-28 14:19:16,858 - WARNING - Gradient accumulation steps mismatch: GradientAccumulationPlugin has 1, DeepSpeed config has 4. Using DeepSpeed's value.
+2025-09-28 14:19:22,004 - WARNING - `use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`...
