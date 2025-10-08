@@ -153,7 +153,7 @@ class KGDataProcessor:
         
         # 保存为tsv文件
         # df.to_csv(self.output_file, sep='\t', index=False, encoding='utf-8')
-        df.sample(100).to_json(self.output_file)
+        df.to_json(self.output_file, orient='records', lines=True)
         print(f"样本数据已保存至: {self.output_file}")
         print(f"生成的样本数据规模: {len(df)}条")
         
