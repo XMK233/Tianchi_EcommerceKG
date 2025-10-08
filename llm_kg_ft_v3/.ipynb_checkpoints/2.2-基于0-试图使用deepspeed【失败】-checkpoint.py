@@ -1,4 +1,7 @@
 import os
+os.environ['https_proxy'] = 'http://127.0.0.1:7890'
+os.environ['http_proxy'] = 'http://127.0.0.1:7890'
+os.environ['all_proxy'] = 'socks5://127.0.0.1:7890'
 os.environ["WANDB_DISABLED"] = "true"
 
 # 增加内存碎片整理配置
@@ -6,8 +9,6 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # 尝试自动检测CUDA路径，如果失败则使用CPU
 import torch
-import numpy as np
-  # 添加numpy导入
 try:
     # 尝试导入CUDA相关模块
     has_cuda = torch.cuda.is_available()
@@ -30,6 +31,11 @@ from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, TrainingArguments, Trainer, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, TaskType
 
+model_path = "/mnt/d/HuggingFaceModels"
+save_dir = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/trained_models/lora-ckpt/final"
+
+# 训练
+
 memory_optim_args = {
     # 根据GPU显存调整参数
     "max_seq_length": 256,            # 减少序列长度节省内存
@@ -41,7 +47,6 @@ memory_optim_args = {
     "gradient_checkpointing_kwargs": {"use_reentrant": False}
 }
 
-model_path = "/mnt/d/HuggingFaceModels"
 dataset = load_dataset("json", data_files="/mnt/d/forCoding_data/Tianchi_EcommerceKG/preprocessedData/df_sample_full.jsonl", split="train")
 
 # 确保数据集不为空
@@ -140,7 +145,10 @@ training_args = TrainingArguments(
     # 添加性能监控
     logging_steps=10,
     # 启用梯度裁剪防止梯度爆炸
-    max_grad_norm=1.0
+    max_grad_norm=1.0,
+    # 禁用Hugging Face默认的分布式训练设置，由DeepSpeed接管
+    ddp_find_unused_parameters=False,
+    local_rank=-1  # 让DeepSpeed处理local_rank
 )
 
 # 自定义Trainer类以确保梯度正确传播并处理额外参数
@@ -174,157 +182,138 @@ class CustomTrainer(Trainer):
             # 调整logits和labels的形状以匹配CrossEntropyLoss的要求
             loss = loss_fct(logits.view(-1, logits.size(-1)), labels.view(-1))
         
-        # # 定期打印GPU内存使用情况
-        # if self.state.global_step % 50 == 0 and has_cuda:
-        #     allocated = torch.cuda.memory_allocated() / (1024**3)
-        #     reserved = torch.cuda.memory_reserved() / (1024**3)
-        #     print(f"GPU内存使用: 已分配 {allocated:.2f}GB, 已保留 {reserved:.2f}GB")
-        
         return (loss, outputs) if return_outputs else loss
 
-# 在GPU上使用自定义Trainer
-trainer = CustomTrainer(model=model, args=training_args, train_dataset=dataset)
+
+import deepspeed
+import argparse
+
+# 添加命令行参数解析，处理DeepSpeed传递的参数
+def parse_args():
+    parser = argparse.ArgumentParser(description="DeepSpeed training")
+    # 添加DeepSpeed需要的参数
+    parser.add_argument('--local_rank', type=int, default=-1, help='local rank passed from distributed launcher')
+    # 添加其他可能的参数
+    return parser.parse_args()
+
+args = parse_args()
+
+# 修改DeepSpeed配置以确保与transformers兼容
+deepspeed_config = {
+  "train_batch_size": "auto",
+  "gradient_accumulation_steps": "auto",
+  "optimizer": {
+    "type": "AdamW",
+    "params": {
+      "lr": 3e-4,
+      "betas": [0.9, 0.95],
+      "weight_decay": 0.01
+    }
+  },
+  "fp16": {
+    "enabled": True,
+    "loss_scale": 0,
+    "loss_scale_window": 1000,
+    "initial_scale_power": 16
+  },
+  "zero_optimization": {
+    "stage": 3,                  # ZeRO阶段（建议2或3）
+    "offload_optimizer": {
+      "device": "cpu",           # 优化器卸载到CPU
+      "pin_memory": True
+    },
+    "allgather_partitions": True,
+    "contiguous_gradients": True
+  },
+  "steps_per_print": 50,
+  # 添加分布式训练配置
+  "dist_backend": "nccl",
+  "distributed": True
+}
+# deepspeed_config = {  
+#   "train_batch_size": 16,  
+#   "gradient_accumulation_steps": 4,  
+#     "gradient_checkpointing": True,
+#   "zero_optimization": {  
+#     "stage": 3,  
+#     "offload_optimizer": {  
+#       "device": "cpu"  
+#     }  
+#   }  
+# }
+
+# 初始化DeepSpeed
+# 注意：不需要手动启用gradient_checkpointing，DeepSpeed会处理
+model_engine, optimizer, trainloader, __ = deepspeed.initialize(
+    model=model,
+    config=deepspeed_config,
+    model_parameters=model.parameters(),
+    training_data=dataset if dataset is not None else None,
+    args=args  # 传递命令行参数
+)
+
+# 在GPU上使用自定义Trainer，注意这里使用model_engine
+trainer = CustomTrainer(
+    model=model_engine,
+    args=training_args,
+    train_dataset=dataset,
+    optimizers=(optimizer, None),  # 使用DeepSpeed初始化的优化器
+)
 
 trainer.train()
+
+
 # 确保保存目录存在
-save_dir = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/trained_models/lora-ckpt/final"
 os.makedirs(save_dir, exist_ok=True)
-trainer.save_model(save_dir)
-print(f"模型已保存到: {save_dir}")
 
-# ===============================================================
-# 以下是获取embedding的代码
-# ===============================================================
-
-def get_text_embedding(text, model, tokenizer, device, max_length=256):
-    """
-    获取文本的embedding向量
+# 与DeepSpeed兼容的模型保存方式
+# 检查是否在主进程上（避免多进程重复保存）
+if not hasattr(model_engine, 'local_rank') or model_engine.local_rank == 0:
+    print(f"正在保存模型到: {save_dir}")
     
-    参数:
-        text (str): 要获取embedding的文本
-        model: 加载的模型
-        tokenizer: 分词器
-        device: 运行设备
-        max_length: 最大序列长度
+    # 使用DeepSpeed的save_checkpoint方法保存完整模型
+    if hasattr(model_engine, 'save_checkpoint'):
+        # 保存DeepSpeed格式的检查点
+        deepspeed_checkpoint_dir = os.path.join(save_dir, "deepspeed_checkpoint")
+        os.makedirs(deepspeed_checkpoint_dir, exist_ok=True)
+        model_engine.save_checkpoint(deepspeed_checkpoint_dir)
+        print(f"DeepSpeed检查点已保存到: {deepspeed_checkpoint_dir}")
     
-    返回:
-        numpy.ndarray: 文本的embedding向量
-    """
-    # 分词处理
-    inputs = tokenizer(
-        text,
-        truncation=True,
-        max_length=max_length,
-        padding="max_length",
-        return_tensors="pt"
-    )
-    
-    # 将输入移至指定设备
-    inputs = {k: v.to(device) for k, v in inputs.items()}
-    
-    # 设置模型为评估模式
-    model.eval()
-    
-    # 禁用梯度计算以提高效率
-    with torch.no_grad():
-        # 获取模型输出
-        outputs = model(**inputs, output_hidden_states=True)
+    # 保存适配Hugging Face格式的模型，便于后续加载和推理
+    # try:
+    # 对于PeftModel，我们需要保存基础模型和适配器
+    if hasattr(model, 'save_pretrained'):
+        # 尝试以普通方式保存模型
+        trainer.save_model(save_dir)
+        print(f"模型已保存到: {save_dir}")
+    else:
+        # 如果是DeepSpeed模型，尝试提取基础模型并保存
+        if hasattr(model_engine, 'module'):
+            base_model = model_engine.module
+            # 如果是PeftModel，使用save_pretrained
+            if hasattr(base_model, 'save_pretrained'):
+                base_model.save_pretrained(save_dir)
+                print(f"基础模型已保存到: {save_dir}")
+    # except Exception as e:
+    #     print(f"保存模型时出错: {e}")
+    #     print("尝试使用替代方法保存模型...")
         
-        # 获取最后一层隐藏状态
-        # 通常使用最后一层的平均池化作为文本的embedding
-        last_hidden_state = outputs.hidden_states[-1]  # [batch_size, seq_length, hidden_size]
-        
-        # 计算所有token的平均值作为句子embedding
-        # 可以根据需求选择不同的池化策略
-        sentence_embedding = torch.mean(last_hidden_state, dim=1)  # [batch_size, hidden_size]
-        
-        # 如果需要，也可以使用[CLS]标记的输出作为embedding
-        # cls_embedding = last_hidden_state[:, 0, :]  # [batch_size, hidden_size]
-        
-        # 处理BFloat16类型，先转换为float32再转为numpy
-        if sentence_embedding.dtype == torch.bfloat16:
-            sentence_embedding = sentence_embedding.to(torch.float32)
-        
-        # 转换为numpy数组并移至CPU
-        sentence_embedding = sentence_embedding.cpu().numpy()
-        
-    return sentence_embedding[0]  # 返回单个样本的embedding
-
-def load_model_for_embedding(model_path, use_quantization=True):
-    """
-    加载训练好的模型用于获取embedding
-    
-    参数:
-        model_path (str): 模型路径
-        use_quantization (bool): 是否使用量化
-    
-    返回:
-        tuple: (model, tokenizer, device)
-    """
-    # 确定设备
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"使用设备: {device}")
-    
-    # 加载分词器
-    tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen3-4B", cache_dir=model_path)
-    tokenizer.pad_token = tokenizer.eos_token
-    
-    # 配置量化参数
-    model_kwargs = {
-        "cache_dir": model_path,
-        "torch_dtype": torch.bfloat16 if torch.cuda.is_available() else torch.float32,
-        "device_map": "auto" if torch.cuda.is_available() else None,
-        "trust_remote_code": True
-    }
-    
-    if use_quantization:
-        quantization_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.float16
-        )
-        model_kwargs["quantization_config"] = quantization_config
-    
-    # 加载基础模型
-    base_model = AutoModelForCausalLM.from_pretrained(
-        "Qwen/Qwen3-4B",
-        **model_kwargs
-    )
-    
-    # 加载lora权重
-    from peft import PeftModel
-    model = PeftModel.from_pretrained(base_model, save_dir)
-    
-    # 移动模型到设备
-    model.to(device)
-    
-    return model, tokenizer, device
-
-# 使用示例
-if __name__ == "__main__":
-    # 示例文本
-    sample_text = "这是一个测试文本，用于获取embedding。"
-    
-    try:
-        # 加载模型
-        print("正在加载模型...")
-        model, tokenizer, device = load_model_for_embedding(model_path)
-        
-        # 获取embedding
-        print("正在获取embedding...")
-        embedding = get_text_embedding(sample_text, model, tokenizer, device)
-        
-        # 打印结果
-        print(f"获取的embedding形状: {embedding.shape}")
-        print(f"embedding示例值: {embedding[:10]}")
-        
-        # 释放内存
-        del model
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
+    #     # 替代保存方法：提取模型权重并手动保存
+    #     try:
+    #         # 获取模型状态字典
+    #         if hasattr(model_engine, 'module'):
+    #             state_dict = model_engine.module.state_dict()
+    #         else:
+    #             state_dict = model_engine.state_dict()
             
-    except Exception as e:
-        print(f"获取embedding时出错: {e}")
+    #         # 保存模型权重
+    #         torch.save(state_dict, os.path.join(save_dir, "pytorch_model.bin"))
+            
+    #         # 保存分词器
+    #         if 'tokenizer' in locals():
+    #             tokenizer.save_pretrained(save_dir)
+    #             print(f"分词器已保存到: {save_dir}")
+                
+    #         print(f"模型权重已保存到: {save_dir}")
+    #     except Exception as inner_e:
+    #         print(f"替代保存方法也失败: {inner_e}")
