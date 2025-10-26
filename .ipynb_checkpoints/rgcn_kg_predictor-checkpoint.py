@@ -10,7 +10,6 @@ from torch_geometric.data import Data
 from torch_geometric.nn import RGCNConv
 import gc  # 垃圾回收
 import psutil  # 系统资源监控
-from tqdm import tqdm  # 进度条
 
 # 设置随机种子以确保结果可复现
 def set_seed(seed=123):
@@ -36,7 +35,7 @@ OUTPUT_FILE_PATH = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/preprocessedData/O
 EMBEDDING_DIM = 200  # 实体和关系嵌入的维度
 LEARNING_RATE = 0.001  # 学习率
 WEIGHT_DECAY = 1e-5  # 权重衰减（L2正则化）
-BATCH_SIZE = 128  # 训练批次大小（从1024减少到128以进一步控制显存）
+BATCH_SIZE = 256  # 训练批次大小（从1024减少到256以控制显存）
 NEGATIVE_SAMPLES = 5  # 每个正样本对应的负样本数量
 
 EPOCHS = 6  # 训练的epoch数量
@@ -330,10 +329,7 @@ def train_model(model, train_dataset, graph_data, mapper, device):
         total_loss = 0
         epoch_start_time = time.time()
         
-        print(f"\n{'='*60}")
-        print(f"Epoch {epoch+1}/{EPOCHS} 开始训练...")
-        print(f"总批次: {len(train_loader)}, 批次大小: {BATCH_SIZE}, 梯度累积步数: {GRADIENT_ACCUMULATION_STEPS}")
-        print(f"{'='*60}")
+        print(f"\nEpoch {epoch+1}/{EPOCHS} 训练中...")
         
         # 定期清理GPU内存
         if torch.cuda.is_available() and epoch > 0:
@@ -342,12 +338,7 @@ def train_model(model, train_dataset, graph_data, mapper, device):
         # 获取更新后的实体嵌入（每个epoch只计算一次）
         updated_embeddings = model(graph_data)
         
-        # 创建进度条
-        progress_bar = tqdm(enumerate(train_loader), total=len(train_loader), 
-                           desc=f"Epoch {epoch+1}/{EPOCHS}", 
-                           bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
-        
-        for batch_idx, batch in progress_bar:
+        for batch_idx, batch in enumerate(train_loader):
             h_ids, r_ids, t_ids = batch
             
             # 转移到设备上
@@ -386,12 +377,14 @@ def train_model(model, train_dataset, graph_data, mapper, device):
                 # 计算正样本得分
                 pos_score = model.score_triple(h_emb, r_emb, t_emb)
                 
-                # 计算负样本得分 - 内存优化，逐个处理负样本
-                neg_scores = []
+                # 计算负样本得分 - 向量化优化
+                h_emb_expanded = h_emb.unsqueeze(1).expand(-1, NEGATIVE_SAMPLES, -1)
+                r_emb_expanded = r_emb.unsqueeze(1).expand(-1, NEGATIVE_SAMPLES, -1)
+                
+                # 向量化计算所有负样本得分
+                neg_scores = torch.zeros(batch_size, NEGATIVE_SAMPLES, device=device)
                 for i in range(NEGATIVE_SAMPLES):
-                    neg_score = model.score_triple(h_emb, r_emb, t_neg_emb[:, i]).squeeze(1)
-                    neg_scores.append(neg_score)
-                neg_scores = torch.stack(neg_scores, dim=1)  # [batch_size, NEGATIVE_SAMPLES]
+                    neg_scores[:, i] = model.score_triple(h_emb_expanded[:, i], r_emb_expanded[:, i], t_neg_emb[:, i]).squeeze(1)
                 
                 # 计算损失 (max-margin)
                 pos_score_expanded = pos_score.expand_as(neg_scores)
@@ -414,14 +407,10 @@ def train_model(model, train_dataset, graph_data, mapper, device):
             if (batch_idx + 1) % 50 == 0:
                 check_memory_usage()
             
-            # 更新进度条信息
-            current_lr = scheduler.get_last_lr()[0]
-            progress_bar.set_postfix({
-                'Loss': f'{loss.item() * GRADIENT_ACCUMULATION_STEPS:.4f}',
-                'AvgLoss': f'{total_loss / (batch_idx + 1):.4f}',
-                'LR': f'{current_lr:.6f}',
-                'GPU_Mem': f'{torch.cuda.memory_allocated() / 1024**3:.1f}GB' if torch.cuda.is_available() else 'N/A'
-            })
+            # 打印进度
+            if (batch_idx + 1) % 10 == 0 or (batch_idx + 1) == len(train_loader):
+                progress = (batch_idx + 1) / len(train_loader) * 100
+                print(f"  Batch {batch_idx+1}/{len(train_loader)} - Loss: {loss.item() * GRADIENT_ACCUMULATION_STEPS:.4f} - Progress: {progress:.1f}%", end='\r')
         
         # 更新学习率
         scheduler.step()
@@ -451,21 +440,15 @@ def evaluate(model, dev_dataset, graph_data, mapper, device, batch_size=64, max_
     print(f"\n开始在开发集上评估模型...")
     print(f"将评估 {total_dev_triples} 个三元组")
     
-    # 大幅减少实体批次大小以控制显存
-    max_entities_per_batch = min(1000, mapper.entity_count)  # 从5000减少到1000
+    # 减少实体批次大小以控制显存
+    max_entities_per_batch = min(5000, mapper.entity_count)
     
     with torch.no_grad():
         # 获取更新后的实体嵌入
         updated_embeddings = model(graph_data)
         
-        # 创建进度条
-        progress_bar = tqdm(range(0, total_dev_triples, batch_size), 
-                               desc="评估进度", 
-                               total=(total_dev_triples + batch_size - 1) // batch_size,
-                               bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
-        
         # 创建批次进行处理
-        for batch_idx, batch_start in enumerate(progress_bar):
+        for batch_start in range(0, total_dev_triples, batch_size):
             batch_end = min(batch_start + batch_size, total_dev_triples)
             batch_triples = dev_dataset.triples[batch_start:batch_end]
             current_batch_size = len(batch_triples)
@@ -484,60 +467,59 @@ def evaluate(model, dev_dataset, graph_data, mapper, device, batch_size=64, max_
             h_emb = updated_embeddings[h_ids]  # [current_batch_size, embedding_dim]
             r_emb = model.relation_embeddings(r_ids)  # [current_batch_size, embedding_dim]
             
-            # 不再预分配大张量，改为分块计算后直接处理结果
+            # 分块处理实体，避免一次性加载所有实体导致显存溢出
+            batch_scores = torch.zeros(current_batch_size, mapper.entity_count, device=device)
             
-            # 流式处理计算排名 - 极内存优化实现
-            correct_entity_ranks = []
-            
-            # 对每个样本分别处理，避免大张量
-            for sample_idx in range(current_batch_size):
-                h_emb_single = h_emb[sample_idx:sample_idx+1]  # [1, embedding_dim]
-                r_emb_single = r_emb[sample_idx:sample_idx+1]  # [1, embedding_dim]
-                correct_entity_id = t_ids[sample_idx].item()
+            # 分块计算得分 - 内存优化实现
+            for entity_start in range(0, mapper.entity_count, max_entities_per_batch):
+                entity_end = min(entity_start + max_entities_per_batch, mapper.entity_count)
+                entity_chunk_size = entity_end - entity_start
                 
-                # 获取正确实体的得分（只需要计算这一个）
-                correct_entity_emb = updated_embeddings[correct_entity_id:correct_entity_id+1]  # [1, embedding_dim]
-                combined_correct = torch.cat([h_emb_single, r_emb_single, correct_entity_emb], dim=1)
-                correct_score = model.score_layer(combined_correct).squeeze()  # 标量
+                # 获取当前块的实体嵌入
+                entity_ids = torch.arange(entity_start, entity_end, device=device)
+                entity_embeddings = updated_embeddings[entity_ids]  # [entity_chunk_size, embedding_dim]
                 
-                # 计算有多少实体得分比正确实体高
-                better_count = 0
+                # 向量化计算当前块的得分 - 内存优化
+                chunk_scores = torch.zeros(current_batch_size, entity_chunk_size, device=device)
                 
-                # 分块处理所有实体
-                for entity_start in range(0, mapper.entity_count, max_entities_per_batch):
-                    entity_end = min(entity_start + max_entities_per_batch, mapper.entity_count)
+                # 分批处理以减少内存使用
+                sub_batch_size = min(32, current_batch_size)  # 进一步减少子批次大小
+                for sub_start in range(0, current_batch_size, sub_batch_size):
+                    sub_end = min(sub_start + sub_batch_size, current_batch_size)
                     
-                    # 获取当前块的实体嵌入
-                    entity_ids = torch.arange(entity_start, entity_end, device=device)
-                    entity_embeddings_chunk = updated_embeddings[entity_ids]  # [chunk_size, embedding_dim]
+                    # 获取子批次的嵌入
+                    sub_h_emb = h_emb[sub_start:sub_end]
+                    sub_r_emb = r_emb[sub_start:sub_end]
                     
-                    # 扩展当前样本的嵌入以匹配实体块大小
-                    h_expanded = h_emb_single.expand(entity_end - entity_start, -1)  # [chunk_size, embedding_dim]
-                    r_expanded = r_emb_single.expand(entity_end - entity_start, -1)  # [chunk_size, embedding_dim]
+                    # 扩展维度以便广播
+                    h_expanded = sub_h_emb.unsqueeze(1)  # [sub_batch_size, 1, embedding_dim]
+                    r_expanded = sub_r_emb.unsqueeze(1)  # [sub_batch_size, 1, embedding_dim]
+                    t_expanded = entity_embeddings.unsqueeze(0)  # [1, entity_chunk_size, embedding_dim]
                     
-                    # 组合并计算得分
-                    combined = torch.cat([h_expanded, r_expanded, entity_embeddings_chunk], dim=1)
-                    scores = model.score_layer(combined).squeeze(1)  # [chunk_size]
+                    # 扩展维度
+                    h_broadcast = h_expanded.expand(-1, entity_chunk_size, -1)
+                    r_broadcast = r_expanded.expand(-1, entity_chunk_size, -1)
+                    t_broadcast = t_expanded.expand(sub_end - sub_start, -1, -1)
                     
-                    # 统计得分更高的实体数量
-                    better_count += (scores > correct_score).sum().item()
-                    
-                    # 立即清理显存
-                    del entity_embeddings_chunk, h_expanded, r_expanded, combined, scores
-                    if torch.cuda.is_available() and entity_start % 3000 == 0:  # 定期清理
-                        torch.cuda.empty_cache()
+                    # 向量化计算得分
+                    for i in range(sub_end - sub_start):
+                        combined = torch.cat([h_broadcast[i], r_broadcast[i], t_broadcast[i]], dim=1)
+                        scores = model.score_layer(combined).squeeze(1)
+                        chunk_scores[sub_start + i, :] = scores
                 
-                # 排名 = 更好的实体数量 + 1
-                rank = better_count + 1
-                correct_entity_ranks.append(rank)
+                batch_scores[:, entity_start:entity_end] = chunk_scores
                 
-                # 清理单样本变量
-                del h_emb_single, r_emb_single, correct_entity_emb, combined_correct, correct_score
-                if torch.cuda.is_available() and sample_idx % 10 == 0:
+                # 清理中间变量，释放显存
+                del entity_embeddings, h_broadcast, r_broadcast, t_broadcast, chunk_scores
+                if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             
-            # 转换为tensor用于后续计算
-            num_better_entities = torch.tensor(correct_entity_ranks, device=device) - 1  # [current_batch_size]
+            # 查找每个样本中正确尾实体的得分
+            correct_scores = torch.gather(batch_scores, 1, t_ids.view(-1, 1))  # [current_batch_size, 1]
+            
+            # 计算排名（得分越高排名越高） - 向量化实现
+            # 计算有多少实体得分比正确实体高（排名即这个数量+1）
+            num_better_entities = (batch_scores > correct_scores).sum(dim=1)  # [current_batch_size]
             ranks = num_better_entities + 1  # [current_batch_size] - 排名从1开始
             
             # 计算指标
@@ -550,13 +532,12 @@ def evaluate(model, dev_dataset, graph_data, mapper, device, batch_size=64, max_
             mrr_score += mrr_contributions.sum().item()
             total_count += current_batch_size
             
-            # 更新进度条信息
-            progress_bar.set_postfix({
-                'HITS@1': f'{hits_at_1/total_count:.4f}' if total_count > 0 else '0.0000',
-                'HITS@10': f'{hits_at_10/total_count:.4f}' if total_count > 0 else '0.0000',
-                'MRR': f'{mrr_score/total_count:.4f}' if total_count > 0 else '0.0000',
-                'GPU_Mem': f'{torch.cuda.memory_allocated() / 1024**3:.1f}GB' if torch.cuda.is_available() else 'N/A'
-            })
+            # 显示进度条
+            progress = min(total_count, total_dev_triples) / total_dev_triples * 100
+            bar_length = 50
+            filled_length = int(bar_length * progress // 100)
+            bar = '█' * filled_length + '-' * (bar_length - filled_length)
+            print(f"\r  评估进度: |{bar}| {progress:.1f}% ({min(total_count, total_dev_triples)}/{total_dev_triples})", end='')
             
             # 清理显存
             del h_emb, r_emb, batch_scores, correct_scores, num_better_entities, ranks
@@ -600,14 +581,8 @@ def predict_tail_entities(model, test_dataset, graph_data, mapper, device, max_h
         # 获取更新后的实体嵌入
         updated_embeddings = model(graph_data)
         
-        # 创建进度条
-        progress_bar = tqdm(range(0, process_count, batch_size), 
-                               desc="预测进度", 
-                               total=(process_count + batch_size - 1) // batch_size,
-                               bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]')
-        
         # 创建批次进行处理
-        for batch_idx, batch_start in enumerate(progress_bar):
+        for batch_start in range(0, process_count, batch_size):
             batch_end = min(batch_start + batch_size, process_count)
             batch_triples = test_dataset.triples[batch_start:batch_end]
             
@@ -623,71 +598,77 @@ def predict_tail_entities(model, test_dataset, graph_data, mapper, device, max_h
             h_emb = updated_embeddings[h_ids]  # [batch_size, embedding_dim]
             r_emb = model.relation_embeddings(r_ids)  # [batch_size, embedding_dim]
             
-            # 不再预分配大张量，直接计算top10结果
+            # 分块处理实体，避免一次性加载所有实体导致显存溢出
+            batch_scores = torch.zeros(len(batch_triples), mapper.entity_count, device=device)
             
-            # 流式处理每个三元组 - 极内存优化实现
-            for triple_idx in range(len(batch_triples)):
-                h_emb_single = h_emb[triple_idx:triple_idx+1]  # [1, embedding_dim]
-                r_emb_single = r_emb[triple_idx:triple_idx+1]  # [1, embedding_dim]
+            # 分块计算得分 - 向量化实现
+            for entity_start in range(0, mapper.entity_count, max_entities_per_batch):
+                entity_end = min(entity_start + max_entities_per_batch, mapper.entity_count)
+                entity_chunk_size = entity_end - entity_start
                 
-                # 为当前三元组收集所有实体的得分
-                all_scores = []
+                # 获取当前块的实体嵌入
+                entity_ids = torch.arange(entity_start, entity_end, device=device)
+                entity_embeddings = updated_embeddings[entity_ids]  # [chunk_size, embedding_dim]
                 
-                # 分块处理所有实体
-                for entity_start in range(0, mapper.entity_count, max_entities_per_batch):
-                    entity_end = min(entity_start + max_entities_per_batch, mapper.entity_count)
-                    entity_chunk_size = entity_end - entity_start
+                # 使用子批次处理，减少内存使用
+                for sub_batch_start in range(0, len(batch_triples), sub_batch_size):
+                    sub_batch_end = min(sub_batch_start + sub_batch_size, len(batch_triples))
                     
-                    # 获取当前块的实体嵌入
-                    entity_ids = torch.arange(entity_start, entity_end, device=device)
-                    entity_embeddings_chunk = updated_embeddings[entity_ids]  # [chunk_size, embedding_dim]
+                    # 获取子批次的嵌入
+                    sub_h_emb = h_emb[sub_batch_start:sub_batch_end]
+                    sub_r_emb = r_emb[sub_batch_start:sub_batch_end]
                     
-                    # 扩展当前样本的嵌入以匹配实体块大小
-                    h_expanded = h_emb_single.expand(entity_chunk_size, -1)  # [chunk_size, embedding_dim]
-                    r_expanded = r_emb_single.expand(entity_chunk_size, -1)  # [chunk_size, embedding_dim]
+                    # 向量化计算当前块的得分
+                    h_expanded = sub_h_emb.unsqueeze(1)  # [sub_batch_size, 1, embedding_dim]
+                    r_expanded = sub_r_emb.unsqueeze(1)  # [sub_batch_size, 1, embedding_dim]
+                    t_expanded = entity_embeddings.unsqueeze(0)  # [1, chunk_size, embedding_dim]
                     
-                    # 组合并计算得分
-                    combined = torch.cat([h_expanded, r_expanded, entity_embeddings_chunk], dim=1)
-                    scores_chunk = model.score_layer(combined).squeeze(1)  # [chunk_size]
+                    # 扩展维度以便广播
+                    h_broadcast = h_expanded.expand(-1, entity_chunk_size, -1)
+                    r_broadcast = r_expanded.expand(-1, entity_chunk_size, -1)
+                    t_broadcast = t_expanded.expand(sub_batch_end - sub_batch_start, -1, -1)
                     
-                    all_scores.append(scores_chunk)
+                    # 向量化计算得分
+                    combined = torch.cat([h_broadcast, r_broadcast, t_broadcast], dim=2)
+                    combined_flat = combined.view(-1, 3 * EMBEDDING_DIM)  # 展平以便处理
+                    scores_flat = model.score_layer(combined_flat).squeeze(1)
+                    scores = scores_flat.view(sub_batch_end - sub_batch_start, entity_chunk_size)
                     
-                    # 立即清理显存
-                    del entity_embeddings_chunk, h_expanded, r_expanded, combined, scores_chunk
-                    if torch.cuda.is_available() and entity_start % 2000 == 0:
-                        torch.cuda.empty_cache()
+                    # 存储到完整得分矩阵中
+                    batch_scores[sub_batch_start:sub_batch_end, entity_start:entity_end] = scores
+                    
+                    # 清理中间变量
+                    del sub_h_emb, sub_r_emb, combined, combined_flat, scores_flat, scores
                 
-                # 合并所有得分
-                if len(all_scores) > 1:
-                    all_scores_tensor = torch.cat(all_scores, dim=0)  # [total_entities]
-                else:
-                    all_scores_tensor = all_scores[0]
-                
-                # 获取top10实体
-                _, top10_indices = torch.topk(all_scores_tensor, k=10)
-                top10_t_ids = top10_indices.tolist()
+                # 清理实体嵌入块
+                del entity_embeddings
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            
+            # 获取每个头实体/关系对的top10尾实体（得分最高的）
+            _, top10_indices = torch.topk(batch_scores, k=10, dim=1)
+            
+            # 处理批次结果
+            for i in range(len(batch_triples)):
+                h, r, _ = batch_triples[i]
+                top10_t_ids = top10_indices[i].tolist()
                 
                 # 转换回实体ID字符串
                 top10_entities = [mapper.id_to_entity[t_id] for t_id in top10_t_ids]
                 
                 # 构建结果行
-                h, r, _ = batch_triples[triple_idx]
                 result_line = [h, r] + top10_entities
                 results.append('\t'.join(result_line))
-                
-                # 清理单三元组变量
-                del h_emb_single, r_emb_single, all_scores_tensor, top10_indices
-                if torch.cuda.is_available() and triple_idx % 5 == 0:
-                    torch.cuda.empty_cache()
             
-            # 更新进度条信息
-            progress_bar.set_postfix({
-                '已处理': f'{batch_end}/{process_count}',
-                'GPU_Mem': f'{torch.cuda.memory_allocated() / 1024**3:.1f}GB' if torch.cuda.is_available() else 'N/A'
-            })
+            # 显示进度条
+            progress = batch_end / process_count * 100
+            bar_length = 50
+            filled_length = int(bar_length * progress // 100)
+            bar = '█' * filled_length + '-' * (bar_length - filled_length)
+            print(f"\r  预测进度: |{bar}| {progress:.1f}% ({batch_end}/{process_count})", end='')
             
             # 定期清理GPU内存
-            if batch_start % (batch_size * 3) == 0 and torch.cuda.is_available():
+            if batch_start % (batch_size * 5) == 0 and torch.cuda.is_available():
                 torch.cuda.empty_cache()
                 check_memory_usage()
     

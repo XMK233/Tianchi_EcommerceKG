@@ -20,10 +20,17 @@ def set_seed(seed=123):
 set_seed()
 
 # 数据路径
+scheme_type = 'transe_origin'
+# 数据路径
 TRAIN_FILE_PATH = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/originalData/OpenBG500/OpenBG500_train.tsv"
 TEST_FILE_PATH = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/originalData/OpenBG500/OpenBG500_test.tsv"
 DEV_FILE_PATH = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/originalData/OpenBG500/OpenBG500_dev.tsv" # 开发集路径
-OUTPUT_FILE_PATH = "/mnt/d/forCoding_data/Tianchi_EcommerceKG/preprocessedData/OpenBG500_test.tsv"
+OUTPUT_FILE_PATH = f"/mnt/d/forCoding_data/Tianchi_EcommerceKG_wsl_v1/preprocessedData/OpenBG500_test__{scheme_type}.tsv"
+
+FORCE_RETRAIN = True
+TRAINED_MODEL_PATH = f"/mnt/d/forCoding_data/Tianchi_EcommerceKG_wsl_v1/trainedModel/trained_model__{scheme_type}.pth"
+
+
 
 # 超参数
 EMBEDDING_DIM = 200  # 实体和关系嵌入的维度
@@ -521,12 +528,70 @@ def main():
     model = TransE(mapper.entity_count, mapper.relation_count, EMBEDDING_DIM)
     model.to(device)
     
-    # 训练模型
-    print("开始训练模型...")
-    train_model(model, train_dataset, mapper, device)
+    # 检测OUTPUT_FILE_PATH的目录是否存在，如果不存在就创建
+    output_dir = os.path.dirname(OUTPUT_FILE_PATH)
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"创建输出目录: {output_dir}")
+    
+    # 检测模型保存目录是否存在，如果不存在就创建
+    model_dir = os.path.dirname(TRAINED_MODEL_PATH)
+    if not os.path.exists(model_dir):
+        os.makedirs(model_dir)
+        print(f"创建模型保存目录: {model_dir}")
+    
+    # 检查是否强制重新训练或模型不存在
+    if FORCE_RETRAIN or not os.path.exists(TRAINED_MODEL_PATH):
+        # 训练模型
+        print("开始训练模型...")
+        train_model(model, train_dataset, mapper, device)
+        
+        # 保存训练好的模型
+        print(f"保存训练好的模型到 {TRAINED_MODEL_PATH}")
+        torch.save({
+            'model_state_dict': model.state_dict(),
+            'entity_count': mapper.entity_count,
+            'relation_count': mapper.relation_count,
+            'embedding_dim': EMBEDDING_DIM,
+            'entity_to_id': mapper.entity_to_id,
+            'relation_to_id': mapper.relation_to_id,
+            'id_to_entity': mapper.id_to_entity,
+            'id_to_relation': mapper.id_to_relation
+        }, TRAINED_MODEL_PATH)
+        print("模型保存完成")
+    else:
+        # 加载已训练的模型
+        print(f"加载已训练的模型从 {TRAINED_MODEL_PATH}")
+        checkpoint = torch.load(TRAINED_MODEL_PATH, map_location=device)
+        
+        # 确保模型结构与保存的模型一致
+        if (mapper.entity_count != checkpoint['entity_count'] or 
+            mapper.relation_count != checkpoint['relation_count'] or
+            EMBEDDING_DIM != checkpoint['embedding_dim']):
+            print("警告：模型参数不匹配，将使用新训练的模型")
+            print("开始训练模型...")
+            train_model(model, train_dataset, mapper, device)
+            
+            # 保存训练好的模型
+            print(f"保存训练好的模型到 {TRAINED_MODEL_PATH}")
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                'entity_count': mapper.entity_count,
+                'relation_count': mapper.relation_count,
+                'embedding_dim': EMBEDDING_DIM,
+                'entity_to_id': mapper.entity_to_id,
+                'relation_to_id': mapper.relation_to_id,
+                'id_to_entity': mapper.id_to_entity,
+                'id_to_relation': mapper.id_to_relation
+            }, TRAINED_MODEL_PATH)
+            print("模型保存完成")
+        else:
+            # 加载模型参数
+            model.load_state_dict(checkpoint['model_state_dict'])
+            print("模型加载完成")
     
     # 在开发集上评估模型
-    print("\n训练完成，开始在开发集上评估模型性能...")
+    print("\n开始在开发集上评估模型性能...")
     evaluate(model, dev_dataset, mapper, device)
     
     # 预测尾实体
